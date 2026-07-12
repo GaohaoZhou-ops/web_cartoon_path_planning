@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path fill="#b8f36a" d="M4 4h45l11 11v45H15L4 49z"/>
+  <path stroke="#07110f" stroke-width="2" d="M32 9v46" opacity=".28"/>
+  <text x="13" y="40" fill="#07110f" font-family="Arial,sans-serif" font-size="22" font-weight="700">R</text>
+  <text x="39" y="40" fill="#07110f" font-family="Arial,sans-serif" font-size="22" font-weight="700">L</text>
+</svg>
