@@ -44,7 +44,11 @@ import {
   type Scenario,
   type SearchRunner,
 } from './pathfinding'
-import { appendFinishedAlgorithms, orderAlgorithmsByFinish } from './ranking'
+import {
+  appendFinishedAlgorithms,
+  orderAlgorithmsByFinish,
+  orderMetricResultsBestFirst,
+} from './ranking'
 
 type Phase = 'editing' | 'running' | 'paused' | 'complete'
 
@@ -1226,7 +1230,7 @@ function FinalTelemetry({
                 ? '预算未连通观测剖面'
                 : '不可达判定剖面'}
           </h2>
-          <p>各图按本项最大观测值归一化，横条越短表示该项消耗越低。</p>
+          <p>各图按本项最大观测值归一化，并由上至下从优到劣排列；横条越短表示该项消耗越低。</p>
         </div>
         <div className={`final-report-stamp ${completedRoutes === 0 ? 'is-failed' : ''}`}>
           <span>ROUTE STATUS</span>
@@ -1285,10 +1289,13 @@ function FinalTelemetry({
       <div className="final-charts-grid">
         {metrics.map((metric, metricIndex) => {
           const Icon = metric.icon
-          const rows = orderedAlgorithms.flatMap((algorithm) => {
-            const runner = runnerById.get(algorithm.id)
-            return runner ? [{ algorithm, runner, value: metric.value(runner) }] : []
-          })
+          const rows = orderMetricResultsBestFirst(
+            orderedAlgorithms.flatMap((algorithm) => {
+              const runner = runnerById.get(algorithm.id)
+              return runner ? [{ algorithm, runner, value: metric.value(runner) }] : []
+            }),
+            ({ runner, value }) => ({ status: runner.status, value }),
+          )
           const observedValues = rows
             .map((row) => row.value)
             .filter((value): value is number => value !== null)

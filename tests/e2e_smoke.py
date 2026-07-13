@@ -40,6 +40,39 @@ def picker_selected_ids(dialog):
     ]
 
 
+def chart_results(page, metric):
+    return [
+        {
+            "status": row.get_attribute("data-status"),
+            "value": (
+                float(value)
+                if (value := row.get_attribute("data-value")) is not None
+                else None
+            ),
+        }
+        for row in page.locator(
+            f'.final-chart-card[data-metric="{metric}"] .final-chart-row'
+        ).all()
+    ]
+
+
+def assert_chart_best_first(results):
+    assert results
+    assert all(
+        result["status"] in ("complete", "failed") for result in results
+    ), results
+    statuses = [result["status"] for result in results]
+    assert statuses == sorted(statuses, key=lambda status: status != "complete"), statuses
+
+    for status in ("complete", "failed"):
+        values = [
+            result["value"] for result in results if result["status"] == status
+        ]
+        populated = [value for value in values if value is not None]
+        assert populated == sorted(populated), values
+        assert values == populated + [None] * (len(values) - len(populated)), values
+
+
 def stub_external_fonts(context):
     context.route(
         "https://fonts.googleapis.com/**",
@@ -207,6 +240,10 @@ with sync_playwright() as playwright:
     assert rank_labels == [
         f"#{rank:02d}" for rank in range(1, selected_count + 1)
     ]
+    finished_card_order = [
+        card.get_attribute("data-algorithm-id")
+        for card in page.locator(".algorithm-card").all()
+    ]
     assert [
         page.locator(".algorithm-card").nth(index).get_attribute("data-algorithm-id")
         for index in range(len(locked_finishers))
@@ -216,12 +253,18 @@ with sync_playwright() as playwright:
     final_report = page.locator(".final-report")
     final_report.wait_for(state="visible")
     assert page.locator(".final-rank-item").count() == selected_count
+    assert [
+        item.get_attribute("data-algorithm-id")
+        for item in page.locator(".final-rank-item").all()
+    ] == finished_card_order
     assert page.locator(".final-chart-card").count() == 4
     assert all(
         page.locator(f'.final-chart-card[data-metric="{metric}"] .final-chart-row').count()
         == selected_count
         for metric in ("expansions", "cpu", "cost", "queue")
     )
+    for metric in ("expansions", "cpu", "cost", "queue"):
+        assert_chart_best_first(chart_results(page, metric))
     ranking_animation = page.locator(".final-rank-item").first.evaluate(
         "element => getComputedStyle(element).animationName"
     )
@@ -360,6 +403,8 @@ with sync_playwright() as playwright:
         == mobile_selected_count
         for metric in ("expansions", "cpu", "cost", "queue")
     )
+    for metric in ("expansions", "cpu", "cost", "queue"):
+        assert_chart_best_first(chart_results(mobile, metric))
     mobile.wait_for_timeout(1400)
     final_mobile_dimensions = mobile.evaluate(
         "({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth })"
