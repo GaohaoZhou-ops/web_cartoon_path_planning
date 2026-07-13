@@ -1,7 +1,7 @@
 export const GRID_COLS = 24
 export const GRID_ROWS = 15
 
-export type AlgorithmId = 'astar' | 'dijkstra' | 'bfs' | 'greedy'
+export type AlgorithmId = 'astar' | 'jps' | 'dijkstra' | 'bfs' | 'greedy'
 export type RunnerStatus = 'ready' | 'running' | 'complete' | 'failed'
 
 export interface Point {
@@ -39,6 +39,15 @@ export const ALGORITHMS: AlgorithmMeta[] = [
     accent: '#b8f36a',
     accentRgb: '184, 243, 106',
     optimality: '启发式最优',
+  },
+  {
+    id: 'jps',
+    name: 'Jump Point Search',
+    shortName: 'JPS',
+    description: '沿对称路径跳跃剪枝，快速定位关键转折',
+    accent: '#c7a7ff',
+    accentRgb: '199, 167, 255',
+    optimality: '跳点剪枝最优',
   },
   {
     id: 'dijkstra',
@@ -299,6 +308,11 @@ function executeSearchStep(runner: SearchRunner, scenario: Scenario) {
     return
   }
 
+  if (runner.id === 'jps') {
+    expandJumpSuccessors(runner, scenario, current, currentKey)
+    return
+  }
+
   const neighbors = getNeighbors(current, scenario)
   let updated = 0
   for (const neighbor of neighbors) {
@@ -348,6 +362,270 @@ function executeSearchStep(runner: SearchRunner, scenario: Scenario) {
   runner.action = `展开 ${formatPoint(current)} · 更新 ${updated} 个邻居`
 }
 
+function expandJumpSuccessors(
+  runner: SearchRunner,
+  scenario: Scenario,
+  current: Point,
+  currentKey: string,
+) {
+  const segment = runner.segment!
+  const candidates = getJumpNeighborCandidates(current, segment, scenario)
+  const currentG = segment.gScore.get(currentKey) ?? Number.POSITIVE_INFINITY
+  let scanned = 0
+  let updated = 0
+
+  for (const candidate of candidates) {
+    const jumpPoint = findJumpPoint(candidate, current, segment.target, scenario, () => {
+      scanned += 1
+    })
+    if (!jumpPoint) continue
+
+    const jumpKey = pointKey(jumpPoint)
+    if (segment.closedKeys.has(jumpKey)) continue
+
+    const tentativeG = currentG + heuristic(current, jumpPoint, scenario.allowDiagonal)
+    const knownG = segment.gScore.get(jumpKey) ?? Number.POSITIVE_INFINITY
+    if (tentativeG + 1e-9 >= knownG) continue
+
+    segment.gScore.set(jumpKey, tentativeG)
+    segment.cameFrom.set(jumpKey, currentKey)
+    const h = heuristic(jumpPoint, segment.target, scenario.allowDiagonal)
+    segment.heap.push({
+      point: jumpPoint,
+      priority: tentativeG + h,
+      secondary: h,
+      g: tentativeG,
+      order: segment.insertionOrder++,
+    })
+    if (!segment.openKeys.has(jumpKey)) runner.generated += 1
+    segment.openKeys.add(jumpKey)
+    runner.relaxations += 1
+    runner.relaxed.push(jumpPoint)
+    updated += 1
+  }
+
+  runner.openPeak = Math.max(runner.openPeak, segment.openKeys.size)
+  runner.action = `展开跳点 ${formatPoint(current)} · 扫描 ${scanned} 格 / 更新 ${updated} 个跳点`
+}
+
+function getJumpNeighborCandidates(
+  current: Point,
+  segment: SegmentSearch,
+  scenario: Scenario,
+): Point[] {
+  const parentKey = segment.cameFrom.get(pointKey(current))
+  if (!parentKey) return getNeighbors(current, scenario).map((neighbor) => neighbor.point)
+
+  const parent = keyPoint(parentKey)
+  const dx = Math.sign(current.x - parent.x)
+  const dy = Math.sign(current.y - parent.y)
+  const candidates: Point[] = []
+  const seen = new Set<string>()
+  const add = (x: number, y: number) => {
+    const point = { x, y }
+    const key = pointKey(point)
+    if (!seen.has(key) && isWalkable(point, scenario)) {
+      seen.add(key)
+      candidates.push(point)
+    }
+  }
+
+  if (!scenario.allowDiagonal) {
+    if (dx !== 0) {
+      add(current.x, current.y - 1)
+      add(current.x, current.y + 1)
+      add(current.x + dx, current.y)
+    } else if (dy !== 0) {
+      add(current.x - 1, current.y)
+      add(current.x + 1, current.y)
+      add(current.x, current.y + dy)
+    }
+    return candidates
+  }
+
+  if (scenario.preventCornerCutting) {
+    if (dx !== 0 && dy !== 0) {
+      const verticalOpen = isWalkable({ x: current.x, y: current.y + dy }, scenario)
+      const horizontalOpen = isWalkable({ x: current.x + dx, y: current.y }, scenario)
+      if (verticalOpen) add(current.x, current.y + dy)
+      if (horizontalOpen) add(current.x + dx, current.y)
+      if (verticalOpen && horizontalOpen) add(current.x + dx, current.y + dy)
+    } else if (dx !== 0) {
+      const forwardOpen = isWalkable({ x: current.x + dx, y: current.y }, scenario)
+      const topOpen = isWalkable({ x: current.x, y: current.y + 1 }, scenario)
+      const bottomOpen = isWalkable({ x: current.x, y: current.y - 1 }, scenario)
+      if (forwardOpen) {
+        add(current.x + dx, current.y)
+        if (topOpen) add(current.x + dx, current.y + 1)
+        if (bottomOpen) add(current.x + dx, current.y - 1)
+      }
+      if (topOpen) add(current.x, current.y + 1)
+      if (bottomOpen) add(current.x, current.y - 1)
+    } else if (dy !== 0) {
+      const forwardOpen = isWalkable({ x: current.x, y: current.y + dy }, scenario)
+      const rightOpen = isWalkable({ x: current.x + 1, y: current.y }, scenario)
+      const leftOpen = isWalkable({ x: current.x - 1, y: current.y }, scenario)
+      if (forwardOpen) {
+        add(current.x, current.y + dy)
+        if (rightOpen) add(current.x + 1, current.y + dy)
+        if (leftOpen) add(current.x - 1, current.y + dy)
+      }
+      if (rightOpen) add(current.x + 1, current.y)
+      if (leftOpen) add(current.x - 1, current.y)
+    }
+    return candidates
+  }
+
+  if (dx !== 0 && dy !== 0) {
+    add(current.x, current.y + dy)
+    add(current.x + dx, current.y)
+    add(current.x + dx, current.y + dy)
+    if (!isWalkable({ x: current.x - dx, y: current.y }, scenario)) {
+      add(current.x - dx, current.y + dy)
+    }
+    if (!isWalkable({ x: current.x, y: current.y - dy }, scenario)) {
+      add(current.x + dx, current.y - dy)
+    }
+  } else if (dx !== 0) {
+    add(current.x + dx, current.y)
+    if (!isWalkable({ x: current.x, y: current.y + 1 }, scenario)) {
+      add(current.x + dx, current.y + 1)
+    }
+    if (!isWalkable({ x: current.x, y: current.y - 1 }, scenario)) {
+      add(current.x + dx, current.y - 1)
+    }
+  } else if (dy !== 0) {
+    add(current.x, current.y + dy)
+    if (!isWalkable({ x: current.x + 1, y: current.y }, scenario)) {
+      add(current.x + 1, current.y + dy)
+    }
+    if (!isWalkable({ x: current.x - 1, y: current.y }, scenario)) {
+      add(current.x - 1, current.y + dy)
+    }
+  }
+  return candidates
+}
+
+function findJumpPoint(
+  point: Point,
+  parent: Point,
+  target: Point,
+  scenario: Scenario,
+  onScan: () => void,
+): Point | null {
+  if (!isWalkable(point, scenario)) return null
+  onScan()
+  if (samePoint(point, target)) return point
+
+  const dx = point.x - parent.x
+  const dy = point.y - parent.y
+  const walkable = (x: number, y: number) => isWalkable({ x, y }, scenario)
+
+  if (!scenario.allowDiagonal) {
+    if (dx !== 0) {
+      if (
+        (walkable(point.x, point.y - 1) && !walkable(point.x - dx, point.y - 1)) ||
+        (walkable(point.x, point.y + 1) && !walkable(point.x - dx, point.y + 1))
+      ) {
+        return point
+      }
+    } else if (dy !== 0) {
+      if (
+        (walkable(point.x - 1, point.y) && !walkable(point.x - 1, point.y - dy)) ||
+        (walkable(point.x + 1, point.y) && !walkable(point.x + 1, point.y - dy))
+      ) {
+        return point
+      }
+      if (
+        findJumpPoint({ x: point.x + 1, y: point.y }, point, target, scenario, onScan) ||
+        findJumpPoint({ x: point.x - 1, y: point.y }, point, target, scenario, onScan)
+      ) {
+        return point
+      }
+    }
+    return findJumpPoint(
+      { x: point.x + dx, y: point.y + dy },
+      point,
+      target,
+      scenario,
+      onScan,
+    )
+  }
+
+  if (scenario.preventCornerCutting) {
+    if (dx !== 0 && dy !== 0) {
+      if (
+        findJumpPoint({ x: point.x + dx, y: point.y }, point, target, scenario, onScan) ||
+        findJumpPoint({ x: point.x, y: point.y + dy }, point, target, scenario, onScan)
+      ) {
+        return point
+      }
+    } else if (dx !== 0) {
+      if (
+        (walkable(point.x, point.y - 1) && !walkable(point.x - dx, point.y - 1)) ||
+        (walkable(point.x, point.y + 1) && !walkable(point.x - dx, point.y + 1))
+      ) {
+        return point
+      }
+    } else if (dy !== 0) {
+      if (
+        (walkable(point.x - 1, point.y) && !walkable(point.x - 1, point.y - dy)) ||
+        (walkable(point.x + 1, point.y) && !walkable(point.x + 1, point.y - dy))
+      ) {
+        return point
+      }
+    }
+
+    if (walkable(point.x + dx, point.y) && walkable(point.x, point.y + dy)) {
+      return findJumpPoint(
+        { x: point.x + dx, y: point.y + dy },
+        point,
+        target,
+        scenario,
+        onScan,
+      )
+    }
+    return null
+  }
+
+  if (dx !== 0 && dy !== 0) {
+    if (
+      (walkable(point.x - dx, point.y + dy) && !walkable(point.x - dx, point.y)) ||
+      (walkable(point.x + dx, point.y - dy) && !walkable(point.x, point.y - dy))
+    ) {
+      return point
+    }
+    if (
+      findJumpPoint({ x: point.x + dx, y: point.y }, point, target, scenario, onScan) ||
+      findJumpPoint({ x: point.x, y: point.y + dy }, point, target, scenario, onScan)
+    ) {
+      return point
+    }
+  } else if (dx !== 0) {
+    if (
+      (walkable(point.x + dx, point.y + 1) && !walkable(point.x, point.y + 1)) ||
+      (walkable(point.x + dx, point.y - 1) && !walkable(point.x, point.y - 1))
+    ) {
+      return point
+    }
+  } else if (dy !== 0) {
+    if (
+      (walkable(point.x + 1, point.y + dy) && !walkable(point.x + 1, point.y)) ||
+      (walkable(point.x - 1, point.y + dy) && !walkable(point.x - 1, point.y))
+    ) {
+      return point
+    }
+  }
+
+  return findJumpPoint(
+    { x: point.x + dx, y: point.y + dy },
+    point,
+    target,
+    scenario,
+    onScan,
+  )
+}
+
 function popNext(runner: SearchRunner, segment: SegmentSearch): HeapNode | undefined {
   if (runner.id === 'bfs') {
     while (segment.queueHead < segment.queue.length) {
@@ -372,7 +650,8 @@ function popNext(runner: SearchRunner, segment: SegmentSearch): HeapNode | undef
 
 function finishSegment(runner: SearchRunner, scenario: Scenario, targetKey: string) {
   const segment = runner.segment!
-  const segmentPath = reconstructPath(segment, targetKey)
+  const jumpPath = reconstructPath(segment, targetKey)
+  const segmentPath = runner.id === 'jps' ? expandJumpPath(jumpPath) : jumpPath
   if (runner.path.length === 0) runner.path.push(...segmentPath)
   else runner.path.push(...segmentPath.slice(1))
 
@@ -408,6 +687,24 @@ function reconstructPath(segment: SegmentSearch, targetKey: string) {
   return result.reverse()
 }
 
+function expandJumpPath(path: Point[]) {
+  if (path.length < 2) return path
+  const expanded: Point[] = [{ ...path[0] }]
+
+  for (let index = 1; index < path.length; index += 1) {
+    const target = path[index]
+    let current = expanded[expanded.length - 1]
+    const dx = Math.sign(target.x - current.x)
+    const dy = Math.sign(target.y - current.y)
+
+    while (!samePoint(current, target)) {
+      current = { x: current.x + dx, y: current.y + dy }
+      expanded.push(current)
+    }
+  }
+  return expanded
+}
+
 function heuristic(a: Point, b: Point, diagonal: boolean) {
   const dx = Math.abs(a.x - b.x)
   const dy = Math.abs(a.y - b.y)
@@ -415,6 +712,16 @@ function heuristic(a: Point, b: Point, diagonal: boolean) {
   const straight = Math.abs(dx - dy)
   const diagonalSteps = Math.min(dx, dy)
   return straight + diagonalSteps * Math.SQRT2
+}
+
+function isWalkable(point: Point, scenario: Scenario) {
+  return (
+    point.x >= 0 &&
+    point.y >= 0 &&
+    point.x < scenario.cols &&
+    point.y < scenario.rows &&
+    !scenario.obstacles.has(pointKey(point))
+  )
 }
 
 function getNeighbors(point: Point, scenario: Scenario) {
@@ -435,8 +742,7 @@ function getNeighbors(point: Point, scenario: Scenario) {
 
   for (const direction of directions) {
     const next = { x: point.x + direction.x, y: point.y + direction.y }
-    if (next.x < 0 || next.y < 0 || next.x >= scenario.cols || next.y >= scenario.rows) continue
-    if (scenario.obstacles.has(pointKey(next))) continue
+    if (!isWalkable(next, scenario)) continue
 
     const isDiagonal = direction.x !== 0 && direction.y !== 0
     if (isDiagonal && scenario.preventCornerCutting) {

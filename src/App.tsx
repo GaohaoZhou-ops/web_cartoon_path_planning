@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   Activity,
   ChevronDown,
@@ -35,11 +35,13 @@ import {
   randomizeObstacles,
   samePoint,
   stepRunner,
+  type AlgorithmId,
   type AlgorithmMeta,
   type Point,
   type Scenario,
   type SearchRunner,
 } from './pathfinding'
+import { appendFinishedAlgorithms, orderAlgorithmsByFinish } from './ranking'
 
 type Phase = 'editing' | 'running' | 'paused' | 'complete'
 
@@ -57,6 +59,7 @@ const TOOL_DEFINITIONS: Array<{
 ]
 
 const SPEEDS = [0.5, 1, 2, 4, 8]
+const ALGORITHM_COUNT = ALGORITHMS.length
 
 export default function App() {
   const [scenario, setScenario] = useState<Scenario>(() => createSampleScenario())
@@ -66,6 +69,7 @@ export default function App() {
   const [speed, setSpeed] = useState(2)
   const [visualTick, setVisualTick] = useState(0)
   const runnersRef = useRef<SearchRunner[]>([])
+  const finishOrderRef = useRef<AlgorithmId[]>([])
   const historyRef = useRef<Scenario[]>([])
   const schedulerRef = useRef({ lastTime: 0, accumulator: 0 })
 
@@ -73,6 +77,11 @@ export default function App() {
   const runners = runnersRef.current
   const routeLength = activeScenario.waypoints.length + 1
   const canRun = Boolean(scenario.start && scenario.end)
+
+  const stepAllRunners = (map: Scenario) => {
+    runnersRef.current.forEach((runner) => stepRunner(runner, map))
+    finishOrderRef.current = appendFinishedAlgorithms(finishOrderRef.current, runnersRef.current)
+  }
 
   useEffect(() => {
     if (phase !== 'editing') return
@@ -108,7 +117,7 @@ export default function App() {
       if (rounds > 0) {
         scheduler.accumulator -= rounds * tickDuration
         for (let round = 0; round < rounds; round += 1) {
-          runnersRef.current.forEach((runner) => stepRunner(runner, snapshot))
+          stepAllRunners(snapshot)
         }
         setVisualTick((tick) => tick + rounds)
       }
@@ -215,6 +224,7 @@ export default function App() {
   const startPlanning = () => {
     if (!scenario.start || !scenario.end) return
     const frozen = cloneScenario(scenario)
+    finishOrderRef.current = []
     runnersRef.current = ALGORITHMS.map((algorithm) => createRunner(algorithm.id, frozen))
     setSnapshot(frozen)
     setVisualTick(0)
@@ -223,12 +233,14 @@ export default function App() {
 
   const restartPlanning = () => {
     if (!snapshot) return
+    finishOrderRef.current = []
     runnersRef.current = ALGORITHMS.map((algorithm) => createRunner(algorithm.id, snapshot))
     setVisualTick(0)
     setPhase('running')
   }
 
   const returnToEditor = () => {
+    finishOrderRef.current = []
     runnersRef.current = []
     setSnapshot(null)
     setPhase('editing')
@@ -244,7 +256,7 @@ export default function App() {
   const stepOnce = () => {
     if (!snapshot || phase === 'complete') return
     if (phase === 'running') setPhase('paused')
-    runnersRef.current.forEach((runner) => stepRunner(runner, snapshot))
+    stepAllRunners(snapshot)
     setVisualTick((tick) => tick + 1)
     if (!runnersRef.current.some((runner) => runner.status === 'running')) setPhase('complete')
   }
@@ -298,6 +310,7 @@ export default function App() {
             <ComparisonStage
               scenario={activeScenario}
               runners={runners}
+              finishOrder={finishOrderRef.current}
               visualTick={visualTick}
               completedCount={completedCount}
             />
@@ -516,7 +529,7 @@ function EditorSidebar({
         {!canRun && <p>请先在网格中设置起点与终点</p>}
         <button className="run-button" disabled={!canRun} onClick={onRun}>
           <Play size={18} fill="currentColor" />
-          开始四算法同步规划
+          开始 {ALGORITHM_COUNT} 算法同步规划
         </button>
       </div>
     </aside>
@@ -573,10 +586,13 @@ function EditorStage({
         </div>
       </div>
 
-      <div className="algorithm-manifest">
+      <div
+        className="algorithm-manifest"
+        style={{ '--runner-count': ALGORITHM_COUNT } as React.CSSProperties}
+      >
         <div className="manifest-intro">
           <span>算法编队</span>
-          <strong>4 RUNNERS</strong>
+          <strong>{ALGORITHM_COUNT} RUNNERS</strong>
         </div>
         {ALGORITHMS.map((algorithm, index) => (
           <div className="manifest-item" key={algorithm.id} style={{ '--accent': algorithm.accent } as React.CSSProperties}>
@@ -596,14 +612,137 @@ function EditorStage({
 function ComparisonStage({
   scenario,
   runners,
+  finishOrder,
   visualTick,
   completedCount,
 }: {
   scenario: Scenario
   runners: SearchRunner[]
+  finishOrder: AlgorithmId[]
   visualTick: number
   completedCount: number
 }) {
+  const displayAlgorithms = orderAlgorithmsByFinish(ALGORITHMS, finishOrder)
+  const algorithmGridRef = useRef<HTMLDivElement>(null)
+  const finalReportRef = useRef<HTMLElement>(null)
+  const previousFinishCountRef = useRef(finishOrder.length)
+  const layoutFinishCountRef = useRef(finishOrder.length)
+  const previousCardRectsRef = useRef(new Map<AlgorithmId, { left: number; top: number }>())
+  const cardAnimationsRef = useRef(new Map<AlgorithmId, Animation>())
+  const nextUnfinishedId = displayAlgorithms.find(
+    (algorithm) => !finishOrder.includes(algorithm.id),
+  )?.id
+  const allFinished = completedCount === ALGORITHM_COUNT && finishOrder.length === ALGORITHM_COUNT
+  const finishAnnouncement =
+    finishOrder.length > 0
+      ? `${finishOrder
+          .map((id, index) => {
+            const runner = runners.find((item) => item.id === id)
+            return `第 ${index + 1} ${algorithmName(id)}，${
+              runner?.status === 'complete' ? '路线完成' : '未找到路线'
+            }`
+          })
+          .join('；')}。${allFinished ? '全部算法结束，终局统计图已生成。' : ''}`
+      : ''
+
+  useLayoutEffect(() => {
+    const grid = algorithmGridRef.current
+    if (!grid) return
+
+    cardAnimationsRef.current.forEach((animation) => animation.cancel())
+    cardAnimationsRef.current.clear()
+
+    const cards = Array.from(grid.querySelectorAll<HTMLElement>('[data-algorithm-id]'))
+    const currentRects = new Map<AlgorithmId, { left: number; top: number }>()
+    cards.forEach((card) => {
+      const id = card.dataset.algorithmId as AlgorithmId | undefined
+      if (id) {
+        const rect = card.getBoundingClientRect()
+        currentRects.set(id, {
+          left: rect.left + window.scrollX,
+          top: rect.top + window.scrollY,
+        })
+      }
+    })
+
+    const previousFinishCount = layoutFinishCountRef.current
+    const shouldAnimate =
+      finishOrder.length > previousFinishCount &&
+      previousCardRectsRef.current.size > 0 &&
+      !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    layoutFinishCountRef.current = finishOrder.length
+
+    if (shouldAnimate) {
+      cards.forEach((card) => {
+        const id = card.dataset.algorithmId as AlgorithmId | undefined
+        if (!id) return
+        const previousRect = previousCardRectsRef.current.get(id)
+        const currentRect = currentRects.get(id)
+        if (!previousRect || !currentRect) return
+        const deltaX = previousRect.left - currentRect.left
+        const deltaY = previousRect.top - currentRect.top
+        if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1) return
+
+        card.style.zIndex = '4'
+        const animation = card.animate(
+          [
+            { transform: `translate(${deltaX}px, ${deltaY}px)` },
+            { transform: 'translate(0, 0)' },
+          ],
+          { duration: 520, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+        )
+        cardAnimationsRef.current.set(id, animation)
+        const clearAnimation = () => {
+          if (cardAnimationsRef.current.get(id) === animation) {
+            cardAnimationsRef.current.delete(id)
+            card.style.zIndex = ''
+          }
+        }
+        animation.addEventListener('finish', clearAnimation, { once: true })
+        animation.addEventListener('cancel', clearAnimation, { once: true })
+      })
+    }
+
+    previousCardRectsRef.current = currentRects
+  }, [finishOrder.length])
+
+  useEffect(
+    () => () => {
+      cardAnimationsRef.current.forEach((animation) => animation.cancel())
+      cardAnimationsRef.current.clear()
+    },
+    [],
+  )
+
+  useEffect(() => {
+    const previousFinishCount = previousFinishCountRef.current
+    previousFinishCountRef.current = finishOrder.length
+    if (finishOrder.length <= previousFinishCount) return
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const delay = reduceMotion ? 0 : 560
+    let animationFrame = 0
+    const timer = window.setTimeout(() => {
+      animationFrame = requestAnimationFrame(() => {
+        const target = nextUnfinishedId
+          ? algorithmGridRef.current?.querySelector<HTMLElement>(
+              `[data-algorithm-id="${nextUnfinishedId}"]`,
+            )
+          : finalReportRef.current
+        target?.scrollIntoView({
+          behavior: reduceMotion ? 'auto' : 'smooth',
+          block: 'start',
+          inline: 'nearest',
+        })
+      })
+    }, delay)
+
+    return () => {
+      window.clearTimeout(timer)
+      cancelAnimationFrame(animationFrame)
+    }
+  }, [finishOrder.length, nextUnfinishedId, allFinished])
+
   return (
     <div className="comparison-stage">
       <div className="comparison-heading">
@@ -613,17 +752,20 @@ function ComparisonStage({
         </div>
         <div className="sync-readout">
           <span className="sync-pulse" />
-          TICK {String(visualTick).padStart(4, '0')} · {completedCount}/4 结束
+          TICK {String(visualTick).padStart(4, '0')} · {completedCount}/{ALGORITHM_COUNT} 结束
         </div>
       </div>
-      <div className="algorithm-grid">
-        {ALGORITHMS.map((algorithm, index) => {
+      <div className="algorithm-grid" ref={algorithmGridRef}>
+        {displayAlgorithms.map((algorithm) => {
           const runner = runners.find((item) => item.id === algorithm.id)
           if (!runner) return null
+          const index = ALGORITHMS.findIndex((item) => item.id === algorithm.id)
+          const finishRank = finishOrder.indexOf(algorithm.id) + 1
           return (
             <AlgorithmCard
               key={algorithm.id}
               index={index}
+              finishRank={finishRank || undefined}
               algorithm={algorithm}
               scenario={scenario}
               runner={runner}
@@ -632,18 +774,30 @@ function ComparisonStage({
           )
         })}
       </div>
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {finishAnnouncement}
+      </div>
+      {allFinished && (
+        <FinalTelemetry
+          reportRef={finalReportRef}
+          runners={runners}
+          finishOrder={finishOrder}
+        />
+      )}
     </div>
   )
 }
 
 function AlgorithmCard({
   index,
+  finishRank,
   algorithm,
   scenario,
   runner,
   visualTick,
 }: {
   index: number
+  finishRank?: number
   algorithm: AlgorithmMeta
   scenario: Scenario
   runner: SearchRunner
@@ -656,12 +810,16 @@ function AlgorithmCard({
 
   return (
     <article
-      className={`algorithm-card algorithm-card--${runner.status}`}
+      className={`algorithm-card algorithm-card--${runner.status} ${finishRank ? 'algorithm-card--ranked' : ''}`}
+      data-algorithm-id={algorithm.id}
+      aria-label={`${algorithm.name}${finishRank ? `，第 ${finishRank} 名结束` : ''}`}
       style={{ '--accent': algorithm.accent, '--accent-rgb': algorithm.accentRgb } as React.CSSProperties}
     >
       <header className="algorithm-card-header">
         <div className="algorithm-identity">
-          <span>0{index + 1}</span>
+          <span className={finishRank ? 'finish-rank' : ''}>
+            {finishRank ? `#${String(finishRank).padStart(2, '0')}` : String(index + 1).padStart(2, '0')}
+          </span>
           <div>
             <h2>{algorithm.name}</h2>
             <p>{algorithm.description}</p>
@@ -705,6 +863,232 @@ function AlgorithmCard({
   )
 }
 
+interface FinalMetricDefinition {
+  id: string
+  label: string
+  unit: string
+  note: string
+  icon: LucideIcon
+  showBest: boolean
+  value: (runner: SearchRunner) => number | null
+  format: (value: number) => string
+}
+
+function FinalTelemetry({
+  reportRef,
+  runners,
+  finishOrder,
+}: {
+  reportRef: React.RefObject<HTMLElement>
+  runners: SearchRunner[]
+  finishOrder: AlgorithmId[]
+}) {
+  const orderedAlgorithms = orderAlgorithmsByFinish(ALGORITHMS, finishOrder).filter((algorithm) =>
+    finishOrder.includes(algorithm.id),
+  )
+  const runnerById = new Map(runners.map((runner) => [runner.id, runner]))
+  const completedRoutes = runners.filter((runner) => runner.status === 'complete').length
+  const metrics: FinalMetricDefinition[] = [
+    {
+      id: 'expansions',
+      label: '扩展节点',
+      unit: 'NODES',
+      note: '行为观测 · JPS 按跳点扩展计',
+      icon: Activity,
+      showBest: false,
+      value: (runner) => runner.expansions,
+      format: (value) => value.toLocaleString('zh-CN'),
+    },
+    {
+      id: 'cpu',
+      label: '计算耗时',
+      unit: 'MS',
+      note: '仅累计搜索与回溯 CPU 时间',
+      icon: Timer,
+      showBest: true,
+      value: (runner) => runner.cpuMs,
+      format: formatCpu,
+    },
+    {
+      id: 'cost',
+      label: '完整路径代价',
+      unit: 'COST',
+      note: '失败路线不参与本项比较',
+      icon: Route,
+      showBest: true,
+      value: (runner) => (runner.status === 'complete' ? runner.pathCost : null),
+      format: (value) => value.toFixed(2),
+    },
+    {
+      id: 'queue',
+      label: '峰值队列',
+      unit: 'NODES',
+      note: '行为观测 · JPS 按跳点前沿计',
+      icon: Waypoints,
+      showBest: false,
+      value: (runner) => runner.openPeak,
+      format: (value) => value.toLocaleString('zh-CN'),
+    },
+  ]
+
+  return (
+    <section className="final-report" ref={reportRef} aria-labelledby="final-report-title">
+      <header className="final-report-header">
+        <div>
+          <span className="eyebrow">FINAL TELEMETRY / 终局对比</span>
+          <h2 id="final-report-title">
+            {completedRoutes > 0 ? '终局性能剖面' : '不可达判定剖面'}
+          </h2>
+          <p>各图按本项最大观测值归一化，横条越短表示该项消耗越低。</p>
+        </div>
+        <div className={`final-report-stamp ${completedRoutes === 0 ? 'is-failed' : ''}`}>
+          <span>ROUTE STATUS</span>
+          <strong>{completedRoutes > 0 ? `${completedRoutes}/${ALGORITHM_COUNT} LOCKED` : 'NO ROUTE'}</strong>
+        </div>
+      </header>
+
+      <section className="final-ranking-panel" aria-labelledby="finish-order-title">
+        <div className="final-panel-heading">
+          <div>
+            <span>RANK SEQUENCE</span>
+            <h3 id="finish-order-title">结束顺序</h3>
+          </div>
+          <small>按逻辑 tick 锁定</small>
+        </div>
+        <div className="final-ranking-track" role="list">
+          {finishOrder.map((id, index) => {
+            const algorithm = ALGORITHMS.find((item) => item.id === id)
+            const runner = runnerById.get(id)
+            if (!algorithm || !runner) return null
+            const succeeded = runner.status === 'complete'
+            return (
+              <div
+                className={`final-rank-item ${succeeded ? 'is-complete' : 'is-failed'}`}
+                key={id}
+                role="listitem"
+                data-algorithm-id={id}
+                style={
+                  {
+                    '--accent': algorithm.accent,
+                    '--accent-rgb': algorithm.accentRgb,
+                    animationDelay: `${120 + index * 110}ms`,
+                  } as React.CSSProperties
+                }
+                aria-label={`第 ${index + 1}，${algorithm.name}，${succeeded ? '路线完成' : '未找到路线'}`}
+              >
+                <span className="final-rank-number">#{String(index + 1).padStart(2, '0')}</span>
+                <div>
+                  <strong>{algorithm.shortName}</strong>
+                  <small>{algorithm.name}</small>
+                </div>
+                <em>{succeeded ? 'LOCKED' : 'NO ROUTE'}</em>
+                <i aria-hidden="true" />
+              </div>
+            )
+          })}
+        </div>
+      </section>
+
+      <div className="final-charts-grid">
+        {metrics.map((metric, metricIndex) => {
+          const Icon = metric.icon
+          const rows = orderedAlgorithms.flatMap((algorithm) => {
+            const runner = runnerById.get(algorithm.id)
+            return runner ? [{ algorithm, runner, value: metric.value(runner) }] : []
+          })
+          const observedValues = rows
+            .map((row) => row.value)
+            .filter((value): value is number => value !== null)
+          const successfulValues = rows
+            .filter((row) => row.runner.status === 'complete')
+            .map((row) => row.value)
+            .filter((value): value is number => value !== null)
+          const maxValue = observedValues.length > 0 ? Math.max(...observedValues) : 0
+          const bestValue =
+            metric.showBest && successfulValues.length > 0 ? Math.min(...successfulValues) : null
+
+          return (
+            <article
+              className="final-chart-card"
+              key={metric.id}
+              data-metric={metric.id}
+              aria-label={`${metric.label}对比图`}
+              style={{ animationDelay: `${280 + metricIndex * 90}ms` }}
+            >
+              <header>
+                <div className="final-chart-title">
+                  <Icon size={15} />
+                  <h3>{metric.label}</h3>
+                </div>
+                <span>{metric.unit}</span>
+              </header>
+              <p>{metric.note}</p>
+              <div className="final-chart-rows" role="list">
+                {rows.map(({ algorithm, runner, value }, rowIndex) => {
+                  const isBest =
+                    runner.status === 'complete' &&
+                    value !== null &&
+                    bestValue !== null &&
+                    Math.abs(value - bestValue) < 1e-9
+                  const barWidth =
+                    value === null || value === 0 || maxValue === 0
+                      ? 0
+                      : Math.max(3, (value / maxValue) * 100)
+                  return (
+                    <div
+                      className={`final-chart-row ${runner.status === 'failed' ? 'is-failed' : ''} ${
+                        isBest ? 'is-best' : ''
+                      }`}
+                      key={algorithm.id}
+                      role="listitem"
+                      data-algorithm-id={algorithm.id}
+                      data-value={value ?? undefined}
+                      data-status={runner.status}
+                      style={
+                        {
+                          '--accent': algorithm.accent,
+                          '--accent-rgb': algorithm.accentRgb,
+                        } as React.CSSProperties
+                      }
+                    >
+                      <div className="final-chart-label">
+                        <i aria-hidden="true" />
+                        <span>{algorithm.shortName}</span>
+                      </div>
+                      <div className="final-chart-track" aria-hidden="true">
+                        {value !== null && (
+                          <span
+                            className="final-chart-fill"
+                            style={{
+                              width: `${barWidth}%`,
+                              animationDelay: `${420 + metricIndex * 90 + rowIndex * 70}ms`,
+                            }}
+                          />
+                        )}
+                      </div>
+                      <div className="final-chart-value">
+                        <strong>{value === null ? '—' : metric.format(value)}</strong>
+                        {isBest && <em>BEST</em>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </article>
+          )
+        })}
+      </div>
+
+      <footer className="final-report-note">
+        <Info size={14} />
+        <p>
+          结束顺序不等同于综合性能评分；同一逻辑 tick 内按算法编队顺序排位。失败项的扩展量、耗时与队列仅表示判定失败前的消耗。
+        </p>
+      </footer>
+    </section>
+  )
+}
+
 function BenchmarkSidebar({
   scenario,
   runners,
@@ -734,7 +1118,7 @@ function BenchmarkSidebar({
         <div className="telemetry-hero">
           <div>
             <span>逻辑调度</span>
-            <strong>1 : 1 : 1 : 1</strong>
+            <strong>{Array.from({ length: ALGORITHM_COUNT }, () => '1').join(' : ')}</strong>
           </div>
           <Zap size={26} />
         </div>
@@ -818,7 +1202,7 @@ function BenchmarkSidebar({
             {failed.length > 0 && ` ${failed.length} 个算法未找到完整路线。`}
           </p>
         ) : phase === 'complete' && failed.length > 0 ? (
-          <p>四种算法均在第 {failed[0].segmentIndex + 1} 航段判定无可行路径，请返回编辑调整障碍或节点。</p>
+          <p>{ALGORITHM_COUNT} 种算法均在第 {failed[0].segmentIndex + 1} 航段判定无可行路径，请返回编辑调整障碍或节点。</p>
         ) : (
           <p>算法完成后自动生成本轮对比摘要。</p>
         )}
@@ -857,7 +1241,7 @@ function PlaybackBar({
     <div className="playback-dock">
       <div className="playback-context">
         <span>SYNC CONTROL</span>
-        <strong>{completedCount}/4 结束 · {routeLength} 航段</strong>
+        <strong>{completedCount}/{ALGORITHM_COUNT} 结束 · {routeLength} 航段</strong>
       </div>
       <div className="transport-controls">
         <button onClick={onRestart} aria-label="重新运行">
