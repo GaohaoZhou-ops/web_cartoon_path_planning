@@ -5,12 +5,12 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "http://127.0.0.1:5173"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 DESKTOP_ALGORITHM_IDS = (
-    "astar",
-    "bidirectional-astar",
-    "theta",
-    "jps-plus",
-    "dstar-lite",
     "flow-field",
+    "field-dstar",
+    "lpa-star",
+    "ad-star",
+    "rrt-star",
+    "prm",
 )
 CORE_ALGORITHM_IDS = ("astar", "jps", "dijkstra", "bfs", "greedy")
 
@@ -111,6 +111,7 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="选择算法并开始", exact=True).click()
     picker = page.get_by_role("dialog", name="选择本轮执行算法", exact=True)
     picker.wait_for(state="visible")
+    assert picker.locator("[data-picker-algorithm-id]").count() == 15
     picker.screenshot(path="/tmp/route-lab-picker.png")
     picker.get_by_role("button", name="清空", exact=True).click()
     picker_confirm = picker.locator(".algorithm-picker-confirm")
@@ -135,7 +136,14 @@ with sync_playwright() as playwright:
     assert set(expanded_by_algorithm(page)) == set(DESKTOP_ALGORITHM_IDS)
     page.wait_for_timeout(850)
     expanded_before_pause = expanded_by_algorithm(page)
-    assert all(value > 0 for value in expanded_before_pause.values())
+    assert all(
+        expanded_before_pause[algorithm] > 0
+        for algorithm in DESKTOP_ALGORITHM_IDS
+        if algorithm != "prm"
+    )
+    assert "采样" in page.locator(
+        '.algorithm-card[data-algorithm-id="prm"] .algorithm-action'
+    ).inner_text()
 
     # Pause must freeze all counters; one synchronized step must advance active runners once.
     page.get_by_role("button", name="暂停").click()
@@ -154,7 +162,7 @@ with sync_playwright() as playwright:
     page.screenshot(path="/tmp/route-lab-running.png", full_page=True)
 
     # Finished cards move to the front and keep their locked finish ranks.
-    page.get_by_role("button", name="0.5×", exact=True).click()
+    page.get_by_role("button", name="8×", exact=True).click()
     page.get_by_role("button", name="播放").click()
     page.wait_for_selector(".algorithm-card .finish-rank", timeout=10_000)
     page.get_by_role("button", name="暂停").click()
@@ -279,8 +287,8 @@ with sync_playwright() as playwright:
     persisted_confirm.click()
     page.get_by_role("button", name="8×", exact=True).click()
     page.wait_for_selector(".phase-indicator--complete", timeout=30_000)
-    assert "路线不可达" in page.locator(".analysis-callout-title").inner_text()
-    assert "无可行路径" in page.locator(".analysis-callout").inner_text()
+    assert "预算未连通" in page.locator(".analysis-callout-title").inner_text()
+    assert "未完成" in page.locator(".analysis-callout").inner_text()
     page.wait_for_selector(".final-report")
     failed_cost_rows = page.locator(
         '.final-chart-card[data-metric="cost"] .final-chart-row[data-status="failed"]'
@@ -340,7 +348,7 @@ with sync_playwright() as playwright:
     assert mobile.locator(".algorithm-card").count() == mobile_selected_count
     assert mobile.locator("canvas.grid-canvas").count() == mobile_selected_count
     assert mobile.locator(".ranking-section").is_visible()
-    assert "扩展" in mobile.locator(".live-table-head").inner_text()
+    assert "工作" in mobile.locator(".live-table-head").inner_text()
     mobile.get_by_role("button", name="8×", exact=True).click()
     mobile.wait_for_selector(".phase-indicator--complete", timeout=30_000, state="attached")
     mobile.wait_for_selector(".final-report")

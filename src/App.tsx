@@ -69,7 +69,13 @@ const NEW_ALGORITHM_IDS = new Set<AlgorithmId>([
   'jps-plus',
   'dstar-lite',
   'flow-field',
+  'field-dstar',
+  'lpa-star',
+  'ad-star',
+  'rrt-star',
+  'prm',
 ])
+const CONTINUOUS_SAMPLING_IDS = new Set<AlgorithmId>(['rrt-star', 'prm'])
 
 function catalogOrder(ids: AlgorithmId[]) {
   const selected = new Set(ids)
@@ -247,13 +253,20 @@ export default function App() {
 
   const openAlgorithmPicker = () => {
     if (!scenario.start || !scenario.end) return
-    setDraftAlgorithmIds(selectedAlgorithmIds)
+    setDraftAlgorithmIds(
+      catalogOrder(selectedAlgorithmIds).filter(
+        (id) => scenario.allowDiagonal || !CONTINUOUS_SAMPLING_IDS.has(id),
+      ),
+    )
     setAlgorithmPickerOpen(true)
   }
 
   const startPlanning = (algorithmIds: AlgorithmId[]) => {
     if (!scenario.start || !scenario.end || algorithmIds.length === 0) return
-    const orderedAlgorithmIds = catalogOrder(algorithmIds)
+    const orderedAlgorithmIds = catalogOrder(algorithmIds).filter(
+      (id) => scenario.allowDiagonal || !CONTINUOUS_SAMPLING_IDS.has(id),
+    )
+    if (orderedAlgorithmIds.length === 0) return
     const frozen = cloneScenario(scenario)
     finishOrderRef.current = []
     runnersRef.current = orderedAlgorithmIds.map((id) => createRunner(id, frozen))
@@ -373,6 +386,7 @@ export default function App() {
       {algorithmPickerOpen && (
         <AlgorithmPicker
           selectedIds={draftAlgorithmIds}
+          disabledIds={scenario.allowDiagonal ? [] : [...CONTINUOUS_SAMPLING_IDS]}
           onSelectedIdsChange={setDraftAlgorithmIds}
           onCancel={() => setAlgorithmPickerOpen(false)}
           onConfirm={() => startPlanning(draftAlgorithmIds)}
@@ -384,11 +398,13 @@ export default function App() {
 
 function AlgorithmPicker({
   selectedIds,
+  disabledIds,
   onSelectedIdsChange,
   onCancel,
   onConfirm,
 }: {
   selectedIds: AlgorithmId[]
+  disabledIds: AlgorithmId[]
   onSelectedIdsChange: (ids: AlgorithmId[]) => void
   onCancel: () => void
   onConfirm: () => void
@@ -398,6 +414,7 @@ function AlgorithmPicker({
   const onCancelRef = useRef(onCancel)
   onCancelRef.current = onCancel
   const selectedSet = new Set(selectedIds)
+  const disabledSet = new Set(disabledIds)
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
@@ -431,8 +448,10 @@ function AlgorithmPicker({
     }
   }, [])
 
-  const selectPreset = (ids: AlgorithmId[]) => onSelectedIdsChange(catalogOrder(ids))
+  const selectPreset = (ids: AlgorithmId[]) =>
+    onSelectedIdsChange(catalogOrder(ids).filter((id) => !disabledSet.has(id)))
   const toggleAlgorithm = (id: AlgorithmId) => {
+    if (disabledSet.has(id)) return
     const next = new Set(selectedIds)
     if (next.has(id)) next.delete(id)
     else next.add(id)
@@ -500,12 +519,14 @@ function AlgorithmPicker({
         <div className="algorithm-picker-grid" role="group" aria-label="可执行算法">
           {ALGORITHMS.map((algorithm, index) => {
             const selected = selectedSet.has(algorithm.id)
+            const disabled = disabledSet.has(algorithm.id)
             return (
               <button
-                className={`algorithm-picker-card ${selected ? 'is-selected' : ''}`}
+                className={`algorithm-picker-card ${selected ? 'is-selected' : ''} ${disabled ? 'is-disabled' : ''}`}
                 type="button"
                 key={algorithm.id}
                 aria-pressed={selected}
+                disabled={disabled}
                 data-picker-algorithm-id={algorithm.id}
                 onClick={() => toggleAlgorithm(algorithm.id)}
                 style={
@@ -522,6 +543,7 @@ function AlgorithmPicker({
                   <span>
                     <strong>{algorithm.name}</strong>
                     {NEW_ALGORITHM_IDS.has(algorithm.id) && <em>新增</em>}
+                    {disabled && <em>需八向</em>}
                   </span>
                   <small>{algorithm.description}</small>
                   <i>{algorithm.optimality}</i>
@@ -537,7 +559,7 @@ function AlgorithmPicker({
         <footer className="algorithm-picker-footer">
           <p>
             <Info size={13} />
-            Flow Field 会计算完整积分场，扩展量与单体寻路算法的统计口径不同。
+            Flow Field 计算完整积分场；RRT* / PRM 为连续空间采样器，需启用斜向移动。
           </p>
           <div>
             <button className="algorithm-picker-cancel" type="button" onClick={onCancel}>
@@ -1033,10 +1055,26 @@ function AlgorithmCard({
   runner: SearchRunner
   visualTick: number
 }) {
+  const samplingPlanner = algorithm.id === 'rrt-star' || algorithm.id === 'prm'
   const statusText =
-    runner.status === 'complete' ? '已完成' : runner.status === 'failed' ? '无路径' : '搜索中'
+    runner.status === 'complete'
+      ? '已完成'
+      : runner.status === 'failed'
+        ? samplingPlanner
+          ? '预算未连通'
+          : '无路径'
+        : '搜索中'
   const totalSegments = runner.route.length - 1
   const activeSegment = Math.min(runner.segmentIndex + 1, totalSegments)
+  const workloadLabel =
+    algorithm.id === 'rrt-star' ? '接受节点' : algorithm.id === 'prm' ? '图扩展' : '扩展节点'
+  const peakLabel = algorithm.id === 'rrt-star' ? '树峰值' : '峰值队列'
+  const displayedCost = runner.path.length ? runner.pathCost : runner.previewCost
+  const footerDetail = runner.samplingStats
+    ? `${runner.samplingStats.phase} · ${runner.samplingStats.accepted} 点 / ${runner.samplingStats.edges} 边`
+    : runner.anytime
+      ? `ε ${runner.anytime.epsilon.toFixed(1)} · ${runner.anytime.rounds} 轮`
+      : `${runner.generated} 已发现`
 
   return (
     <article
@@ -1072,22 +1110,32 @@ function AlgorithmCard({
           LEG {String(activeSegment).padStart(2, '0')} / {String(totalSegments).padStart(2, '0')}
         </div>
         <div className="canvas-legend">
-          <span><i className="legend-frontier" /> 前沿</span>
-          <span><i className="legend-visited" /> 已扩展</span>
-          <span><i className="legend-path" /> 路径</span>
+          {samplingPlanner ? (
+            <>
+              <span><i className="legend-frontier" /> 采样点</span>
+              <span><i className="legend-visited" /> 图连线</span>
+              <span><i className="legend-path" /> 当前解</span>
+            </>
+          ) : (
+            <>
+              <span><i className="legend-frontier" /> 前沿</span>
+              <span><i className="legend-visited" /> 已扩展</span>
+              <span><i className="legend-path" /> 路径</span>
+            </>
+          )}
         </div>
       </div>
 
       <div className="metric-strip">
-        <Metric label="扩展节点" value={runner.expansions.toLocaleString('zh-CN')} emphasize />
+        <Metric label={workloadLabel} value={runner.expansions.toLocaleString('zh-CN')} emphasize />
         <Metric label="计算耗时" value={formatCpu(runner.cpuMs)} unit="ms" />
-        <Metric label="路径代价" value={runner.path.length ? runner.pathCost.toFixed(2) : '—'} />
-        <Metric label="峰值队列" value={String(runner.openPeak)} />
+        <Metric label="路径代价" value={displayedCost === undefined ? '—' : displayedCost.toFixed(2)} />
+        <Metric label={peakLabel} value={String(runner.openPeak)} />
       </div>
       <footer className="algorithm-action">
         <Activity size={13} />
         <span>{runner.action}</span>
-        <small>{runner.generated} 已发现</small>
+        <small>{footerDetail}</small>
       </footer>
     </article>
   )
@@ -1120,12 +1168,15 @@ function FinalTelemetry({
   )
   const runnerById = new Map(runners.map((runner) => [runner.id, runner]))
   const completedRoutes = runners.filter((runner) => runner.status === 'complete').length
+  const includesSamplingPlanner = algorithms.some(
+    (algorithm) => algorithm.id === 'rrt-star' || algorithm.id === 'prm',
+  )
   const metrics: FinalMetricDefinition[] = [
     {
       id: 'expansions',
-      label: '扩展节点',
+      label: '扩展 / 工作量',
       unit: 'NODES',
-      note: '行为观测 · 跳点算法按跳点，Flow Field 按完整积分场计',
+      note: '行为观测 · 跳点、积分场、采样树与路网查询口径不同',
       icon: Activity,
       showBest: false,
       value: (runner) => runner.expansions,
@@ -1155,7 +1206,7 @@ function FinalTelemetry({
       id: 'queue',
       label: '峰值队列',
       unit: 'NODES',
-      note: '行为观测 · 跳点算法与完整积分场的队列口径不同',
+      note: '行为观测 · RRT* 此项表示树节点峰值，其余为活动队列',
       icon: Waypoints,
       showBest: false,
       value: (runner) => runner.openPeak,
@@ -1169,13 +1220,23 @@ function FinalTelemetry({
         <div>
           <span className="eyebrow">FINAL TELEMETRY / 终局对比</span>
           <h2 id="final-report-title">
-            {completedRoutes > 0 ? '终局性能剖面' : '不可达判定剖面'}
+            {completedRoutes > 0
+              ? '终局性能剖面'
+              : includesSamplingPlanner
+                ? '预算未连通观测剖面'
+                : '不可达判定剖面'}
           </h2>
           <p>各图按本项最大观测值归一化，横条越短表示该项消耗越低。</p>
         </div>
         <div className={`final-report-stamp ${completedRoutes === 0 ? 'is-failed' : ''}`}>
           <span>ROUTE STATUS</span>
-          <strong>{completedRoutes > 0 ? `${completedRoutes}/${algorithms.length} LOCKED` : 'NO ROUTE'}</strong>
+          <strong>
+            {completedRoutes > 0
+              ? `${completedRoutes}/${algorithms.length} LOCKED`
+              : includesSamplingPlanner
+                ? 'UNRESOLVED'
+                : 'NO ROUTE'}
+          </strong>
         </div>
       </header>
 
@@ -1314,7 +1375,7 @@ function FinalTelemetry({
       <footer className="final-report-note">
         <Info size={14} />
         <p>
-          结束顺序不等同于综合性能评分；同一逻辑 tick 内按算法编队顺序排位。失败项的扩展量、耗时与队列仅表示判定失败前的消耗。
+          结束顺序不等同于综合性能评分；同一逻辑 tick 内按算法编队顺序排位。RRT* / PRM 的失败仅表示固定采样预算内未连通，并非不可达证明。
         </p>
       </footer>
     </section>
@@ -1337,6 +1398,9 @@ function BenchmarkSidebar({
   void visualTick
   const completed = runners.filter((runner) => runner.status === 'complete')
   const failed = runners.filter((runner) => runner.status === 'failed')
+  const includesSamplingPlanner = algorithms.some(
+    (algorithm) => algorithm.id === 'rrt-star' || algorithm.id === 'prm',
+  )
   const bestExpanded = completed.length
     ? completed.reduce((best, runner) => (runner.expansions < best.expansions ? runner : best))
     : null
@@ -1356,7 +1420,7 @@ function BenchmarkSidebar({
           </div>
           <Zap size={26} />
         </div>
-        <p className="telemetry-note">每个逻辑 tick 为每个未结束算法分配一次有效节点扩展。</p>
+        <p className="telemetry-note">每个逻辑 tick 为每个未结束算法推进一次有效算法步骤。</p>
       </section>
 
       <section className="panel-section">
@@ -1377,7 +1441,7 @@ function BenchmarkSidebar({
       </section>
 
       <section className="panel-section ranking-section">
-        <SectionTitle index="RANK" title="扩展量对比" accessory="越少越好" />
+        <SectionTitle index="RANK" title="工作量观测" accessory="口径见说明" />
         <div className="ranking-list">
           {algorithms.map((algorithm) => {
             const runner = runners.find((item) => item.id === algorithm.id)
@@ -1407,7 +1471,7 @@ function BenchmarkSidebar({
         <SectionTitle index="DATA" title="实时数据" />
         <div className="live-table" role="table" aria-label="算法实时统计">
           <div className="live-table-head" role="row">
-            <span>算法</span><span>扩展</span><span>计算 ms</span><span>代价</span>
+            <span>算法</span><span>工作</span><span>计算 ms</span><span>代价</span>
           </div>
           {algorithms.map((algorithm) => {
             const runner = runners.find((item) => item.id === algorithm.id)
@@ -1417,7 +1481,7 @@ function BenchmarkSidebar({
                 <span style={{ color: algorithm.accent }}>{algorithm.shortName}</span>
                 <span>{runner.expansions}</span>
                 <span>{formatCpu(runner.cpuMs)}</span>
-                <span>{runner.path.length ? runner.pathCost.toFixed(2) : '—'}</span>
+                <span>{runner.path.length ? runner.pathCost.toFixed(2) : runner.previewCost?.toFixed(2) ?? '—'}</span>
               </div>
             )
           })}
@@ -1427,7 +1491,13 @@ function BenchmarkSidebar({
       <section className={`analysis-callout ${phase === 'complete' ? 'is-ready' : ''}`}>
         <div className="analysis-callout-title">
           <Gauge size={16} />
-          {phase === 'complete' ? (completed.length ? '本轮观测' : '路线不可达') : '等待完整样本'}
+          {phase === 'complete'
+            ? completed.length
+              ? '本轮观测'
+              : includesSamplingPlanner
+                ? '预算未连通'
+                : '路线不可达'
+            : '等待完整样本'}
         </div>
         {phase === 'complete' && bestExpanded && bestCpu ? (
           <p>
@@ -1436,7 +1506,7 @@ function BenchmarkSidebar({
             {failed.length > 0 && ` ${failed.length} 个算法未找到完整路线。`}
           </p>
         ) : phase === 'complete' && failed.length > 0 ? (
-          <p>{algorithms.length} 种算法均在第 {failed[0].segmentIndex + 1} 航段判定无可行路径，请返回编辑调整障碍或节点。</p>
+          <p>{algorithms.length} 种算法均未完成第 {failed[0].segmentIndex + 1} 航段，请返回编辑调整障碍、节点或采样设置。</p>
         ) : (
           <p>算法完成后自动生成本轮对比摘要。</p>
         )}
@@ -1444,7 +1514,7 @@ function BenchmarkSidebar({
 
       <div className="method-note">
         <Info size={14} />
-        <p><strong>统计口径</strong>耗时仅累计在线搜索与回溯，不含 JPS+ 静态表预处理、动画、暂停和 Canvas 绘制；Flow Field 会生成完整目标积分场。</p>
+        <p><strong>统计口径</strong>耗时仅累计在线规划与回溯；Flow Field 生成完整积分场，RRT* / PRM 使用固定采样预算，工作量不可与网格扩展数直接等同。</p>
       </div>
     </aside>
   )

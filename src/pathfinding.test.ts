@@ -3,7 +3,9 @@ import {
   ALGORITHMS,
   createRunner,
   hasLineOfSight,
+  isContinuousEdgeFree,
   pointKey,
+  repairIncrementalRunner,
   stepRunner,
   type AlgorithmId,
   type Point,
@@ -100,13 +102,17 @@ describe('incremental pathfinding runners', () => {
       start: { x: 0, y: 1 },
       end: { x: 2, y: 1 },
       obstacles: new Set(['1,0', '1,1', '1,2']),
-      allowDiagonal: false,
+      allowDiagonal: true,
     })
 
     for (const algorithm of ALGORITHMS) {
       const runner = finish(createRunner(algorithm.id, map), map)
       expect(runner.status).toBe('failed')
-      expect(runner.action).toContain('无可行路径')
+      if (algorithm.id === 'rrt-star' || algorithm.id === 'prm') {
+        expect(runner.action).toMatch(/采样预算|采样路网/)
+      } else {
+        expect(runner.action).toContain('无可行路径')
+      }
     }
   })
 
@@ -226,6 +232,8 @@ describe('incremental pathfinding runners', () => {
       'dstar-lite',
       'flow-field',
       'jps-plus',
+      'lpa-star',
+      'ad-star',
     ]
     const modes = [
       { allowDiagonal: false, preventCornerCutting: true },
@@ -268,6 +276,17 @@ describe('incremental pathfinding runners', () => {
               8,
             )
             expectValidPath(runner, map)
+          }
+        }
+        const field = finish(createRunner('field-dstar', map), map)
+        expect(field.status, `field-dstar ${JSON.stringify(mode)} sample=${sample}`).toBe(oracle.status)
+        if (field.status === 'complete') {
+          if (!mode.allowDiagonal) expect(field.pathCost).toBeCloseTo(oracle.pathCost, 8)
+          for (let index = 1; index < field.path.length; index += 1) {
+            expect(
+              isContinuousEdgeFree(field.path[index - 1], field.path[index], map),
+              `field edge ${JSON.stringify(mode)} sample=${sample}`,
+            ).toBe(true)
           }
         }
       }
@@ -371,4 +390,208 @@ describe('incremental pathfinding runners', () => {
     const blocked = finish(createRunner('jps-plus', map), map)
     expect(blocked.status).toBe('failed')
   })
+
+  it('runs LPA* forward and AD* through all epsilon refinements', () => {
+    const map = scenario({ cols: 8, rows: 6, end: { x: 7, y: 5 } })
+    const lpa = createRunner('lpa-star', map)
+    stepRunner(lpa, map)
+    expect(pointKey(lpa.current!)).toBe(pointKey(map.start!))
+    finish(lpa, map)
+
+    const ad = finish(createRunner('ad-star', map), map)
+    const oracle = finish(createRunner('dijkstra', map), map)
+    expect(lpa.pathCost).toBeCloseTo(oracle.pathCost, 8)
+    expect(ad.pathCost).toBeCloseTo(oracle.pathCost, 8)
+    expect(ad.anytime?.epsilon).toBe(1)
+    expect(ad.anytime?.rounds).toBe(4)
+  })
+
+  it('improves a genuinely suboptimal AD* incumbent before epsilon reaches one', () => {
+    const map = scenario({
+      cols: 8,
+      rows: 6,
+      end: { x: 7, y: 5 },
+      obstacles: new Set(
+        '6,0 0,1 2,1 0,2 1,2 6,2 3,3 4,3 6,3 0,4 3,4 5,4 0,5'.split(' '),
+      ),
+    })
+    const ad = finish(createRunner('ad-star', map), map)
+    const oracle = finish(createRunner('dijkstra', map), map)
+    const history = ad.anytime?.history ?? []
+    expect(history.map((round) => round.epsilon)).toEqual([2.5, 2, 1.5, 1])
+    expect(history[0].cost).toBeGreaterThan(history[history.length - 1].cost)
+    for (let index = 1; index < history.length; index += 1) {
+      expect(history[index].cost).toBeLessThanOrEqual(history[index - 1].cost + 1e-9)
+    }
+    expect(ad.pathCost).toBeCloseTo(oracle.pathCost, 8)
+  })
+
+  it('uses a fractional Field D* interpolation policy in open space', () => {
+    const map = scenario({
+      cols: 3,
+      rows: 2,
+      start: { x: 2, y: 1 },
+      end: { x: 0, y: 0 },
+    })
+    const field = finish(createRunner('field-dstar', map), map)
+    const discrete = finish(createRunner('dijkstra', map), map)
+    expect(field.status).toBe('complete')
+    expect(field.path.some((point) => !Number.isInteger(point.x) || !Number.isInteger(point.y))).toBe(true)
+    expect(field.path[1].x).toBeCloseTo(1, 8)
+    expect(field.path[1].y).toBeCloseTo(0.5449101394, 6)
+    expect(field.pathCost).toBeLessThan(discrete.pathCost)
+    for (let index = 1; index < field.path.length; index += 1) {
+      expect(isContinuousEdgeFree(field.path[index - 1], field.path[index], map)).toBe(true)
+    }
+
+    const cardinal = { ...map, obstacles: new Set(map.obstacles), allowDiagonal: false }
+    const cardinalField = finish(createRunner('field-dstar', cardinal), cardinal)
+    const cardinalOracle = finish(createRunner('dijkstra', cardinal), cardinal)
+    expect(cardinalField.pathCost).toBeCloseTo(cardinalOracle.pathCost, 8)
+    expect(cardinalField.path.every((point) => Number.isInteger(point.x) && Number.isInteger(point.y))).toBe(true)
+  })
+
+  it('keeps Field D* face extraction no worse than the discrete grid detour', () => {
+    const map = scenario({
+      cols: 10,
+      rows: 8,
+      start: { x: 0, y: 0 },
+      end: { x: 9, y: 7 },
+      obstacles: new Set(
+        '7,0 8,0 2,1 4,1 6,1 4,2 5,2 6,2 9,2 7,3 0,4 7,4 2,5 1,6 2,6 4,6 0,7 8,7'.split(' '),
+      ),
+    })
+    const field = finish(createRunner('field-dstar', map), map)
+    const discrete = finish(createRunner('dijkstra', map), map)
+    expect(field.status).toBe('complete')
+    expect(field.pathCost).toBeLessThanOrEqual(discrete.pathCost + 1e-8)
+
+  })
+
+  it('keeps continuous collision checks symmetric at blocked corners', () => {
+    const strict = scenario({
+      cols: 2,
+      rows: 2,
+      start: { x: 0, y: 0 },
+      end: { x: 1, y: 1 },
+      obstacles: new Set(['1,0', '0,1']),
+      preventCornerCutting: true,
+    })
+    const permissive = {
+      ...strict,
+      obstacles: new Set(strict.obstacles),
+      preventCornerCutting: false,
+    }
+    expect(isContinuousEdgeFree(strict.start!, strict.end!, strict)).toBe(false)
+    expect(isContinuousEdgeFree(strict.end!, strict.start!, strict)).toBe(false)
+    expect(isContinuousEdgeFree(permissive.start!, permissive.end!, permissive)).toBe(true)
+    expect(isContinuousEdgeFree(permissive.end!, permissive.start!, permissive)).toBe(true)
+  })
+
+  it('builds deterministic collision-free RRT* trees and PRM roadmaps', () => {
+    const map = scenario({
+      cols: 8,
+      rows: 6,
+      end: { x: 7, y: 5 },
+      obstacles: new Set(['2,1', '2,2', '2,3', '4,2', '5,2']),
+    })
+    for (const id of ['rrt-star', 'prm'] as AlgorithmId[]) {
+      const first = finish(createRunner(id, map), map)
+      const second = finish(createRunner(id, map), map)
+      expect(first.status, id).toBe('complete')
+      expect(second.status, id).toBe('complete')
+      expect(first.path, id).toEqual(second.path)
+      expect(first.pathCost, id).toBeCloseTo(second.pathCost, 10)
+      expect(first.graphVisual?.edges.length, id).toBeGreaterThan(0)
+      for (let index = 1; index < first.path.length; index += 1) {
+        expect(isContinuousEdgeFree(first.path[index - 1], first.path[index], map), id).toBe(true)
+      }
+    }
+  })
+
+  it('requires any-angle movement for continuous sampling planners', () => {
+    const map = scenario({ allowDiagonal: false })
+    for (const id of ['rrt-star', 'prm'] as AlgorithmId[]) {
+      const runner = createRunner(id, map)
+      expect(runner.status).toBe('failed')
+      expect(runner.action).toContain('需要启用斜向移动')
+    }
+  })
+
+  it('repairs LPA*, Field D* and AD* state after a local obstacle change', () => {
+    const original = scenario({
+      cols: 5,
+      rows: 3,
+      start: { x: 0, y: 1 },
+      end: { x: 4, y: 1 },
+      allowDiagonal: false,
+    })
+    const changed = {
+      ...original,
+      obstacles: new Set(['2,1']),
+    }
+    const oracle = finish(createRunner('dijkstra', changed), changed)
+    for (const id of ['lpa-star', 'field-dstar', 'ad-star'] as AlgorithmId[]) {
+      const runner = finish(createRunner(id, original), original)
+      expect(runner.path.map(pointKey)).toContain('2,1')
+      repairIncrementalRunner(runner, changed, [{ x: 2, y: 1 }])
+      finish(runner, changed)
+      expect(runner.status, id).toBe('complete')
+      expect(runner.path.map(pointKey), id).not.toContain('2,1')
+      expect(runner.pathCost, id).toBeCloseTo(oracle.pathCost, 8)
+    }
+  })
+
+  it('handles zero-length sampling legs without duplicate endpoints', () => {
+    const map = scenario({
+      start: { x: 2, y: 2 },
+      end: { x: 2, y: 2 },
+    })
+    for (const id of ['rrt-star', 'prm'] as AlgorithmId[]) {
+      const runner = finish(createRunner(id, map), map)
+      expect(runner.status).toBe('complete')
+      expect(runner.path).toEqual([{ x: 2, y: 2 }])
+      expect(runner.pathCost).toBe(0)
+    }
+
+    const direct = scenario({ cols: 2, rows: 2, end: { x: 1, y: 0 } })
+    const rrt = finish(createRunner('rrt-star', direct), direct)
+    expect(rrt.path[rrt.path.length - 1]).toEqual(direct.end)
+    for (let index = 1; index < rrt.path.length; index += 1) {
+      expect(euclideanForTest(rrt.path[index - 1], rrt.path[index])).toBeGreaterThan(1e-8)
+    }
+  })
+
+  it('finds a deterministic route through a one-cell-wide S corridor', () => {
+    const cols = 12
+    const rows = 8
+    const free = new Set<string>()
+    for (let x = 0; x <= 8; x += 1) free.add(`${x},1`)
+    for (let y = 1; y <= 5; y += 1) free.add(`8,${y}`)
+    for (let x = 3; x <= 8; x += 1) free.add(`${x},5`)
+    for (let y = 5; y <= 7; y += 1) free.add(`3,${y}`)
+    for (let x = 3; x < cols; x += 1) free.add(`${x},7`)
+    const obstacles = new Set<string>()
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) if (!free.has(`${x},${y}`)) obstacles.add(`${x},${y}`)
+    }
+    const map = scenario({
+      cols,
+      rows,
+      start: { x: 0, y: 1 },
+      end: { x: 11, y: 7 },
+      obstacles,
+    })
+    for (const id of ['rrt-star', 'prm'] as AlgorithmId[]) {
+      const runner = finish(createRunner(id, map), map)
+      expect(runner.status, id).toBe('complete')
+      for (let index = 1; index < runner.path.length; index += 1) {
+        expect(isContinuousEdgeFree(runner.path[index - 1], runner.path[index], map), id).toBe(true)
+      }
+    }
+  })
 })
+
+function euclideanForTest(a: Point, b: Point) {
+  return Math.hypot(a.x - b.x, a.y - b.y)
+}

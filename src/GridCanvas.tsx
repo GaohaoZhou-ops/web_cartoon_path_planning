@@ -219,6 +219,10 @@ function drawGrid(
         ctx.stroke()
       }
     }
+
+    if (runner.graphVisual) {
+      drawGraphVisual(ctx, runner.graphVisual, cellWidth, cellHeight, accent, accentRgb)
+    }
   }
 
   scenario.obstacles.forEach((key) => {
@@ -252,6 +256,10 @@ function drawGrid(
   ctx.lineWidth = 1
   ctx.stroke()
 
+  if (runner?.graphVisual?.sample) {
+    drawGraphSample(ctx, runner.graphVisual.sample, cellWidth, cellHeight, accent)
+  }
+
   const routePoints = [scenario.start, ...scenario.waypoints, scenario.end].filter(
     (point): point is Point => point !== null,
   )
@@ -267,6 +275,26 @@ function drawGrid(
     ctx.strokeStyle = 'rgba(240, 244, 224, 0.28)'
     ctx.lineWidth = Math.max(1, Math.min(cellWidth, cellHeight) * 0.07)
     ctx.stroke()
+    ctx.setLineDash([])
+  }
+
+  if (runner?.previewPath && runner.previewPath.length > 1) {
+    ctx.beginPath()
+    runner.previewPath.forEach((point, index) => {
+      const x = (point.x + 0.5) * cellWidth
+      const y = (point.y + 0.5) * cellHeight
+      if (index === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    })
+    ctx.setLineDash([Math.max(3, cellWidth * 0.22), Math.max(2, cellWidth * 0.13)])
+    ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
+    ctx.strokeStyle = `rgba(${accentRgb}, 0.82)`
+    ctx.lineWidth = Math.max(1.4, Math.min(cellWidth, cellHeight) * 0.105)
+    ctx.shadowColor = accent
+    ctx.shadowBlur = 5
+    ctx.stroke()
+    ctx.shadowBlur = 0
     ctx.setLineDash([])
   }
 
@@ -316,6 +344,79 @@ function drawGrid(
   ctx.strokeStyle = runner?.status === 'failed' ? 'rgba(255, 113, 141, 0.72)' : `rgba(${accentRgb}, 0.3)`
   ctx.lineWidth = 1.5
   ctx.strokeRect(0.75, 0.75, width - 1.5, height - 1.5)
+}
+
+function drawGraphVisual(
+  ctx: CanvasRenderingContext2D,
+  graph: NonNullable<SearchRunner['graphVisual']>,
+  cellWidth: number,
+  cellHeight: number,
+  accent: string,
+  accentRgb: string,
+) {
+  ctx.save()
+  ctx.lineCap = 'round'
+  for (const edge of graph.edges) {
+    ctx.beginPath()
+    ctx.moveTo((edge.from.x + 0.5) * cellWidth, (edge.from.y + 0.5) * cellHeight)
+    ctx.lineTo((edge.to.x + 0.5) * cellWidth, (edge.to.y + 0.5) * cellHeight)
+    ctx.strokeStyle =
+      edge.kind === 'roadmap'
+        ? `rgba(${accentRgb}, 0.16)`
+        : edge.kind === 'rewire'
+          ? `rgba(${accentRgb}, 0.72)`
+          : `rgba(${accentRgb}, 0.34)`
+    ctx.lineWidth = edge.kind === 'roadmap' ? 0.75 : 1.05
+    ctx.stroke()
+  }
+
+  const radius = Math.max(1.2, Math.min(cellWidth, cellHeight) * 0.08)
+  for (const node of graph.nodes) {
+    ctx.beginPath()
+    ctx.arc(
+      (node.point.x + 0.5) * cellWidth,
+      (node.point.y + 0.5) * cellHeight,
+      node.state === 'open' ? radius * 1.45 : radius,
+      0,
+      Math.PI * 2,
+    )
+    ctx.fillStyle =
+      node.state === 'closed'
+        ? `rgba(${accentRgb}, 0.28)`
+        : node.state === 'open'
+          ? accent
+          : `rgba(${accentRgb}, ${graph.kind === 'prm' ? 0.52 : 0.72})`
+    ctx.fill()
+  }
+
+  ctx.restore()
+}
+
+function drawGraphSample(
+  ctx: CanvasRenderingContext2D,
+  sample: NonNullable<NonNullable<SearchRunner['graphVisual']>['sample']>,
+  cellWidth: number,
+  cellHeight: number,
+  accent: string,
+) {
+  const x = (sample.point.x + 0.5) * cellWidth
+  const y = (sample.point.y + 0.5) * cellHeight
+  const radius = Math.max(2.4, Math.min(cellWidth, cellHeight) * 0.18)
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(x, y, radius, 0, Math.PI * 2)
+  ctx.strokeStyle = sample.status === 'accepted' ? accent : '#ff718d'
+  ctx.lineWidth = 1.3
+  ctx.stroke()
+  if (sample.status === 'rejected') {
+    ctx.beginPath()
+    ctx.moveTo(x - radius * 0.55, y - radius * 0.55)
+    ctx.lineTo(x + radius * 0.55, y + radius * 0.55)
+    ctx.moveTo(x + radius * 0.55, y - radius * 0.55)
+    ctx.lineTo(x - radius * 0.55, y + radius * 0.55)
+    ctx.stroke()
+  }
+  ctx.restore()
 }
 
 function drawMarker(
