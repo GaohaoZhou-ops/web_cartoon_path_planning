@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   ALGORITHMS,
   createRunner,
+  hasLineOfSight,
   pointKey,
   stepRunner,
+  type AlgorithmId,
   type Point,
   type Scenario,
   type SearchRunner,
@@ -216,5 +218,157 @@ describe('incremental pathfinding runners', () => {
       expect(Math.max(dx, dy)).toBe(1)
       expect(dx + dy).toBeGreaterThan(0)
     }
+  })
+
+  it('keeps advanced optimal grid planners aligned with Dijkstra', () => {
+    const algorithmIds: AlgorithmId[] = [
+      'bidirectional-astar',
+      'dstar-lite',
+      'flow-field',
+      'jps-plus',
+    ]
+    const modes = [
+      { allowDiagonal: false, preventCornerCutting: true },
+      { allowDiagonal: true, preventCornerCutting: true },
+      { allowDiagonal: true, preventCornerCutting: false },
+    ]
+    let seed = 0x1a2b3c4d
+    const random = () => {
+      seed ^= seed << 13
+      seed ^= seed >>> 17
+      seed ^= seed << 5
+      return (seed >>> 0) / 2 ** 32
+    }
+
+    for (const mode of modes) {
+      for (let sample = 0; sample < 60; sample += 1) {
+        const obstacles = new Set<string>()
+        for (let y = 0; y < 6; y += 1) {
+          for (let x = 0; x < 8; x += 1) {
+            if ((x !== 0 || y !== 0) && (x !== 7 || y !== 5) && random() < 0.26) {
+              obstacles.add(`${x},${y}`)
+            }
+          }
+        }
+        const map = scenario({
+          cols: 8,
+          rows: 6,
+          start: { x: 0, y: 0 },
+          end: { x: 7, y: 5 },
+          obstacles,
+          ...mode,
+        })
+        const oracle = finish(createRunner('dijkstra', map), map)
+        for (const id of algorithmIds) {
+          const runner = finish(createRunner(id, map), map)
+          expect(runner.status, `${id} ${JSON.stringify(mode)} sample=${sample}`).toBe(oracle.status)
+          if (runner.status === 'complete') {
+            expect(runner.pathCost, `${id} ${JSON.stringify(mode)} sample=${sample}`).toBeCloseTo(
+              oracle.pathCost,
+              8,
+            )
+            expectValidPath(runner, map)
+          }
+        }
+      }
+    }
+  })
+
+  it('builds direct and obstacle-safe any-angle Theta* paths', () => {
+    const openMap = scenario({ cols: 7, rows: 5, end: { x: 6, y: 4 } })
+    const direct = finish(createRunner('theta', openMap), openMap)
+    expect(direct.status).toBe('complete')
+    expect(direct.path).toEqual([openMap.start, openMap.end])
+    expect(direct.pathCost).toBeCloseTo(Math.hypot(6, 4), 8)
+
+    const blockedMap = scenario({
+      cols: 8,
+      rows: 6,
+      end: { x: 7, y: 5 },
+      obstacles: new Set(['2,1', '2,2', '2,3', '4,3', '5,3']),
+    })
+    const theta = finish(createRunner('theta', blockedMap), blockedMap)
+    expect(theta.status).toBe('complete')
+    let cost = 0
+    for (let index = 1; index < theta.path.length; index += 1) {
+      expect(hasLineOfSight(theta.path[index - 1], theta.path[index], blockedMap)).toBe(true)
+      cost += Math.hypot(
+        theta.path[index].x - theta.path[index - 1].x,
+        theta.path[index].y - theta.path[index - 1].y,
+      )
+    }
+    expect(cost).toBeCloseTo(theta.pathCost, 8)
+
+    const cardinalMap = { ...blockedMap, obstacles: new Set(blockedMap.obstacles), allowDiagonal: false }
+    const cardinalTheta = finish(createRunner('theta', cardinalMap), cardinalMap)
+    const cardinalOracle = finish(createRunner('dijkstra', cardinalMap), cardinalMap)
+    expect(cardinalTheta.pathCost).toBeCloseTo(cardinalOracle.pathCost, 8)
+    expectValidPath(cardinalTheta, cardinalMap)
+  })
+
+  it('alternates balanced Bidirectional A* fronts and finishes on an expansion tick', () => {
+    const map = scenario({ cols: 8, rows: 6, end: { x: 7, y: 5 } })
+    const runner = createRunner('bidirectional-astar', map)
+
+    stepRunner(runner, map)
+    stepRunner(runner, map)
+    expect(runner.visited.has(pointKey(map.start!))).toBe(true)
+    expect(runner.visited.has(pointKey(map.end!))).toBe(true)
+
+    while (runner.status === 'running') {
+      const expansionsBefore = runner.expansions
+      stepRunner(runner, map)
+      if (runner.finishedAt !== null) {
+        expect(runner.expansions).toBe(expansionsBefore + 1)
+      }
+    }
+    expect(runner.status).toBe('complete')
+  })
+
+  it('applies corner rules symmetrically to Theta* line of sight', () => {
+    const strict = scenario({
+      cols: 4,
+      rows: 2,
+      start: { x: 0, y: 0 },
+      end: { x: 3, y: 1 },
+      obstacles: new Set(['1,1']),
+      preventCornerCutting: true,
+    })
+    const permissive = {
+      ...strict,
+      obstacles: new Set(strict.obstacles),
+      preventCornerCutting: false,
+    }
+
+    expect(hasLineOfSight(strict.start!, strict.end!, strict)).toBe(false)
+    expect(hasLineOfSight(strict.end!, strict.start!, strict)).toBe(false)
+    expect(hasLineOfSight(permissive.start!, permissive.end!, permissive)).toBe(true)
+    expect(hasLineOfSight(permissive.end!, permissive.start!, permissive)).toBe(true)
+  })
+
+  it('runs D* Lite backward and completes the full Flow Field integration map', () => {
+    const map = scenario({ cols: 4, rows: 3, end: { x: 3, y: 2 } })
+    const dstar = createRunner('dstar-lite', map)
+    stepRunner(dstar, map)
+    expect(pointKey(dstar.current!)).toBe(pointKey(map.end!))
+
+    const flow = finish(createRunner('flow-field', map), map)
+    expect(flow.status).toBe('complete')
+    expect(flow.visited.size).toBe(12)
+    expectValidPath(flow, map)
+  })
+
+  it('invalidates JPS+ preprocessing when the same scenario object changes', () => {
+    const map = scenario({
+      cols: 5,
+      rows: 1,
+      end: { x: 4, y: 0 },
+      allowDiagonal: false,
+    })
+    expect(finish(createRunner('jps-plus', map), map).status).toBe('complete')
+
+    map.obstacles.add('2,0')
+    const blocked = finish(createRunner('jps-plus', map), map)
+    expect(blocked.status).toBe('failed')
   })
 })

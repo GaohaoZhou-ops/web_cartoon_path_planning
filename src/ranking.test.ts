@@ -22,10 +22,7 @@ describe('algorithm card finish order', () => {
     finishOrder = appendFinishedAlgorithms(finishOrder, runners)
     expect(orderAlgorithmsByFinish(ALGORITHMS, finishOrder).map((algorithm) => algorithm.id)).toEqual([
       'greedy',
-      'astar',
-      'jps',
-      'dijkstra',
-      'bfs',
+      ...ALGORITHMS.map((algorithm) => algorithm.id).filter((id) => id !== 'greedy'),
     ])
 
     runners.find((runner) => runner.id === 'jps')!.status = 'complete'
@@ -35,9 +32,9 @@ describe('algorithm card finish order', () => {
     expect(orderAlgorithmsByFinish(ALGORITHMS, finishOrder).map((algorithm) => algorithm.id)).toEqual([
       'greedy',
       'jps',
-      'astar',
-      'dijkstra',
-      'bfs',
+      ...ALGORITHMS.map((algorithm) => algorithm.id).filter(
+        (id) => id !== 'greedy' && id !== 'jps',
+      ),
     ])
   })
 })

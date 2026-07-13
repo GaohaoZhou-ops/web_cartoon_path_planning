@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   Activity,
+  Check,
   ChevronDown,
   ChevronUp,
   CircleDot,
@@ -10,6 +11,7 @@ import {
   Gauge,
   Info,
   LockKeyhole,
+  Layers3,
   MapPin,
   Pause,
   Pencil,
@@ -22,6 +24,7 @@ import {
   Trash2,
   Undo2,
   Waypoints,
+  X,
   Zap,
   type LucideIcon,
 } from 'lucide-react'
@@ -59,7 +62,19 @@ const TOOL_DEFINITIONS: Array<{
 ]
 
 const SPEEDS = [0.5, 1, 2, 4, 8]
-const ALGORITHM_COUNT = ALGORITHMS.length
+const CORE_ALGORITHM_IDS: AlgorithmId[] = ['astar', 'jps', 'dijkstra', 'bfs', 'greedy']
+const NEW_ALGORITHM_IDS = new Set<AlgorithmId>([
+  'bidirectional-astar',
+  'theta',
+  'jps-plus',
+  'dstar-lite',
+  'flow-field',
+])
+
+function catalogOrder(ids: AlgorithmId[]) {
+  const selected = new Set(ids)
+  return ALGORITHMS.filter((algorithm) => selected.has(algorithm.id)).map((algorithm) => algorithm.id)
+}
 
 export default function App() {
   const [scenario, setScenario] = useState<Scenario>(() => createSampleScenario())
@@ -68,6 +83,12 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>('editing')
   const [speed, setSpeed] = useState(2)
   const [visualTick, setVisualTick] = useState(0)
+  const [algorithmPickerOpen, setAlgorithmPickerOpen] = useState(false)
+  const [selectedAlgorithmIds, setSelectedAlgorithmIds] = useState<AlgorithmId[]>(() =>
+    ALGORITHMS.map((algorithm) => algorithm.id),
+  )
+  const [draftAlgorithmIds, setDraftAlgorithmIds] = useState<AlgorithmId[]>([])
+  const [activeAlgorithmIds, setActiveAlgorithmIds] = useState<AlgorithmId[]>([])
   const runnersRef = useRef<SearchRunner[]>([])
   const finishOrderRef = useRef<AlgorithmId[]>([])
   const historyRef = useRef<Scenario[]>([])
@@ -77,6 +98,9 @@ export default function App() {
   const runners = runnersRef.current
   const routeLength = activeScenario.waypoints.length + 1
   const canRun = Boolean(scenario.start && scenario.end)
+  const activeAlgorithms = activeAlgorithmIds
+    .map((id) => ALGORITHMS.find((algorithm) => algorithm.id === id))
+    .filter((algorithm): algorithm is AlgorithmMeta => Boolean(algorithm))
 
   const stepAllRunners = (map: Scenario) => {
     runnersRef.current.forEach((runner) => stepRunner(runner, map))
@@ -84,7 +108,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (phase !== 'editing') return
+    if (phase !== 'editing' || algorithmPickerOpen) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLButtonElement) return
       const shortcuts: Record<string, EditTool> = {
@@ -95,7 +119,7 @@ export default function App() {
         '5': 'end',
       }
       if (shortcuts[event.key]) setTool(shortcuts[event.key])
-      if (event.key === 'Enter' && canRun) startPlanning()
+      if (event.key === 'Enter' && canRun) openAlgorithmPicker()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
@@ -221,20 +245,30 @@ export default function App() {
     })
   }
 
-  const startPlanning = () => {
+  const openAlgorithmPicker = () => {
     if (!scenario.start || !scenario.end) return
+    setDraftAlgorithmIds(selectedAlgorithmIds)
+    setAlgorithmPickerOpen(true)
+  }
+
+  const startPlanning = (algorithmIds: AlgorithmId[]) => {
+    if (!scenario.start || !scenario.end || algorithmIds.length === 0) return
+    const orderedAlgorithmIds = catalogOrder(algorithmIds)
     const frozen = cloneScenario(scenario)
     finishOrderRef.current = []
-    runnersRef.current = ALGORITHMS.map((algorithm) => createRunner(algorithm.id, frozen))
+    runnersRef.current = orderedAlgorithmIds.map((id) => createRunner(id, frozen))
+    setSelectedAlgorithmIds(orderedAlgorithmIds)
+    setActiveAlgorithmIds(orderedAlgorithmIds)
+    setAlgorithmPickerOpen(false)
     setSnapshot(frozen)
     setVisualTick(0)
     setPhase('running')
   }
 
   const restartPlanning = () => {
-    if (!snapshot) return
+    if (!snapshot || activeAlgorithmIds.length === 0) return
     finishOrderRef.current = []
-    runnersRef.current = ALGORITHMS.map((algorithm) => createRunner(algorithm.id, snapshot))
+    runnersRef.current = activeAlgorithmIds.map((id) => createRunner(id, snapshot))
     setVisualTick(0)
     setPhase('running')
   }
@@ -242,6 +276,7 @@ export default function App() {
   const returnToEditor = () => {
     finishOrderRef.current = []
     runnersRef.current = []
+    setActiveAlgorithmIds([])
     setSnapshot(null)
     setPhase('editing')
     setVisualTick(0)
@@ -269,7 +304,7 @@ export default function App() {
         phase={phase}
         scenario={activeScenario}
         canRun={canRun}
-        onRun={startPlanning}
+        onRun={openAlgorithmPicker}
         onEdit={returnToEditor}
       />
 
@@ -285,7 +320,7 @@ export default function App() {
             onSample={loadSample}
             onRandomize={randomize}
             onClearObstacles={clearObstacles}
-            onRun={startPlanning}
+            onRun={openAlgorithmPicker}
             onRemoveWaypoint={removeWaypoint}
             onMoveWaypoint={moveWaypoint}
             onSetOption={setScenarioOption}
@@ -294,6 +329,7 @@ export default function App() {
           <BenchmarkSidebar
             scenario={activeScenario}
             runners={runners}
+            algorithms={activeAlgorithms}
             phase={phase}
             visualTick={visualTick}
           />
@@ -310,6 +346,7 @@ export default function App() {
             <ComparisonStage
               scenario={activeScenario}
               runners={runners}
+              algorithms={activeAlgorithms}
               finishOrder={finishOrderRef.current}
               visualTick={visualTick}
               completedCount={completedCount}
@@ -323,6 +360,7 @@ export default function App() {
           phase={phase}
           speed={speed}
           completedCount={completedCount}
+          algorithmCount={activeAlgorithms.length}
           routeLength={routeLength}
           visualTick={visualTick}
           onSpeedChange={setSpeed}
@@ -331,6 +369,192 @@ export default function App() {
           onRestart={restartPlanning}
         />
       )}
+
+      {algorithmPickerOpen && (
+        <AlgorithmPicker
+          selectedIds={draftAlgorithmIds}
+          onSelectedIdsChange={setDraftAlgorithmIds}
+          onCancel={() => setAlgorithmPickerOpen(false)}
+          onConfirm={() => startPlanning(draftAlgorithmIds)}
+        />
+      )}
+    </div>
+  )
+}
+
+function AlgorithmPicker({
+  selectedIds,
+  onSelectedIdsChange,
+  onCancel,
+  onConfirm,
+}: {
+  selectedIds: AlgorithmId[]
+  onSelectedIdsChange: (ids: AlgorithmId[]) => void
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const dialogRef = useRef<HTMLElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const onCancelRef = useRef(onCancel)
+  onCancelRef.current = onCancel
+  const selectedSet = new Set(selectedIds)
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    closeButtonRef.current?.focus()
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onCancelRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled)') ?? [],
+      )
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [])
+
+  const selectPreset = (ids: AlgorithmId[]) => onSelectedIdsChange(catalogOrder(ids))
+  const toggleAlgorithm = (id: AlgorithmId) => {
+    const next = new Set(selectedIds)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onSelectedIdsChange(catalogOrder([...next]))
+  }
+
+  return (
+    <div
+      className="algorithm-picker-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel()
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="algorithm-picker"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="algorithm-picker-title"
+        aria-describedby="algorithm-picker-description"
+      >
+        <header className="algorithm-picker-header">
+          <div className="algorithm-picker-title-lockup">
+            <span className="algorithm-picker-icon" aria-hidden="true">
+              <Layers3 size={18} />
+            </span>
+            <div>
+              <span className="eyebrow">RUN MANIFEST / 运行编队</span>
+              <h2 id="algorithm-picker-title">选择本轮执行算法</h2>
+              <p id="algorithm-picker-description">
+                仅为选中的算法创建实时画布；完成排名与终局图表也会按本轮编队生成。
+              </p>
+            </div>
+          </div>
+          <button
+            ref={closeButtonRef}
+            className="algorithm-picker-close"
+            type="button"
+            onClick={onCancel}
+            aria-label="关闭算法选择"
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="algorithm-picker-toolbar">
+          <div>
+            <span>已选择</span>
+            <strong>{String(selectedIds.length).padStart(2, '0')}</strong>
+            <small>/ {ALGORITHMS.length}</small>
+          </div>
+          <div className="algorithm-picker-presets" aria-label="算法快捷选择">
+            <button type="button" onClick={() => selectPreset(ALGORITHMS.map((algorithm) => algorithm.id))}>
+              全选
+            </button>
+            <button type="button" onClick={() => selectPreset(CORE_ALGORITHM_IDS)}>
+              仅基础
+            </button>
+            <button type="button" onClick={() => selectPreset([])} disabled={selectedIds.length === 0}>
+              清空
+            </button>
+          </div>
+        </div>
+
+        <div className="algorithm-picker-grid" role="group" aria-label="可执行算法">
+          {ALGORITHMS.map((algorithm, index) => {
+            const selected = selectedSet.has(algorithm.id)
+            return (
+              <button
+                className={`algorithm-picker-card ${selected ? 'is-selected' : ''}`}
+                type="button"
+                key={algorithm.id}
+                aria-pressed={selected}
+                data-picker-algorithm-id={algorithm.id}
+                onClick={() => toggleAlgorithm(algorithm.id)}
+                style={
+                  {
+                    '--accent': algorithm.accent,
+                    '--accent-rgb': algorithm.accentRgb,
+                  } as React.CSSProperties
+                }
+              >
+                <span className="algorithm-picker-card-index">
+                  {String(index + 1).padStart(2, '0')}
+                </span>
+                <span className="algorithm-picker-card-copy">
+                  <span>
+                    <strong>{algorithm.name}</strong>
+                    {NEW_ALGORITHM_IDS.has(algorithm.id) && <em>新增</em>}
+                  </span>
+                  <small>{algorithm.description}</small>
+                  <i>{algorithm.optimality}</i>
+                </span>
+                <span className="algorithm-picker-check" aria-hidden="true">
+                  {selected && <Check size={14} strokeWidth={3} />}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+
+        <footer className="algorithm-picker-footer">
+          <p>
+            <Info size={13} />
+            Flow Field 会计算完整积分场，扩展量与单体寻路算法的统计口径不同。
+          </p>
+          <div>
+            <button className="algorithm-picker-cancel" type="button" onClick={onCancel}>
+              取消
+            </button>
+            <button
+              className="algorithm-picker-confirm"
+              type="button"
+              disabled={selectedIds.length === 0}
+              onClick={onConfirm}
+            >
+              <Play size={16} fill="currentColor" />
+              运行 {selectedIds.length} 个算法
+            </button>
+          </div>
+        </footer>
+      </section>
     </div>
   )
 }
@@ -387,7 +611,7 @@ function Header({
         {phase === 'editing' ? (
           <button className="primary-action" disabled={!canRun} onClick={onRun}>
             <LockKeyhole size={17} />
-            锁定并开始
+            选择并开始
           </button>
         ) : (
           <button className="secondary-action" onClick={onEdit}>
@@ -529,7 +753,7 @@ function EditorSidebar({
         {!canRun && <p>请先在网格中设置起点与终点</p>}
         <button className="run-button" disabled={!canRun} onClick={onRun}>
           <Play size={18} fill="currentColor" />
-          开始 {ALGORITHM_COUNT} 算法同步规划
+          选择算法并开始
         </button>
       </div>
     </aside>
@@ -588,11 +812,11 @@ function EditorStage({
 
       <div
         className="algorithm-manifest"
-        style={{ '--runner-count': ALGORITHM_COUNT } as React.CSSProperties}
+        style={{ '--manifest-columns': 5 } as React.CSSProperties}
       >
         <div className="manifest-intro">
-          <span>算法编队</span>
-          <strong>{ALGORITHM_COUNT} RUNNERS</strong>
+          <span>算法目录</span>
+          <strong>{ALGORITHMS.length} AVAILABLE</strong>
         </div>
         {ALGORITHMS.map((algorithm, index) => (
           <div className="manifest-item" key={algorithm.id} style={{ '--accent': algorithm.accent } as React.CSSProperties}>
@@ -612,17 +836,19 @@ function EditorStage({
 function ComparisonStage({
   scenario,
   runners,
+  algorithms,
   finishOrder,
   visualTick,
   completedCount,
 }: {
   scenario: Scenario
   runners: SearchRunner[]
+  algorithms: AlgorithmMeta[]
   finishOrder: AlgorithmId[]
   visualTick: number
   completedCount: number
 }) {
-  const displayAlgorithms = orderAlgorithmsByFinish(ALGORITHMS, finishOrder)
+  const displayAlgorithms = orderAlgorithmsByFinish(algorithms, finishOrder)
   const algorithmGridRef = useRef<HTMLDivElement>(null)
   const finalReportRef = useRef<HTMLElement>(null)
   const previousFinishCountRef = useRef(finishOrder.length)
@@ -632,7 +858,10 @@ function ComparisonStage({
   const nextUnfinishedId = displayAlgorithms.find(
     (algorithm) => !finishOrder.includes(algorithm.id),
   )?.id
-  const allFinished = completedCount === ALGORITHM_COUNT && finishOrder.length === ALGORITHM_COUNT
+  const allFinished =
+    algorithms.length > 0 &&
+    completedCount === algorithms.length &&
+    finishOrder.length === algorithms.length
   const finishAnnouncement =
     finishOrder.length > 0
       ? `${finishOrder
@@ -752,7 +981,7 @@ function ComparisonStage({
         </div>
         <div className="sync-readout">
           <span className="sync-pulse" />
-          TICK {String(visualTick).padStart(4, '0')} · {completedCount}/{ALGORITHM_COUNT} 结束
+          TICK {String(visualTick).padStart(4, '0')} · {completedCount}/{algorithms.length} 结束
         </div>
       </div>
       <div className="algorithm-grid" ref={algorithmGridRef}>
@@ -781,6 +1010,7 @@ function ComparisonStage({
         <FinalTelemetry
           reportRef={finalReportRef}
           runners={runners}
+          algorithms={algorithms}
           finishOrder={finishOrder}
         />
       )}
@@ -877,13 +1107,15 @@ interface FinalMetricDefinition {
 function FinalTelemetry({
   reportRef,
   runners,
+  algorithms,
   finishOrder,
 }: {
   reportRef: React.RefObject<HTMLElement>
   runners: SearchRunner[]
+  algorithms: AlgorithmMeta[]
   finishOrder: AlgorithmId[]
 }) {
-  const orderedAlgorithms = orderAlgorithmsByFinish(ALGORITHMS, finishOrder).filter((algorithm) =>
+  const orderedAlgorithms = orderAlgorithmsByFinish(algorithms, finishOrder).filter((algorithm) =>
     finishOrder.includes(algorithm.id),
   )
   const runnerById = new Map(runners.map((runner) => [runner.id, runner]))
@@ -893,7 +1125,7 @@ function FinalTelemetry({
       id: 'expansions',
       label: '扩展节点',
       unit: 'NODES',
-      note: '行为观测 · JPS 按跳点扩展计',
+      note: '行为观测 · 跳点算法按跳点，Flow Field 按完整积分场计',
       icon: Activity,
       showBest: false,
       value: (runner) => runner.expansions,
@@ -903,7 +1135,7 @@ function FinalTelemetry({
       id: 'cpu',
       label: '计算耗时',
       unit: 'MS',
-      note: '仅累计搜索与回溯 CPU 时间',
+      note: '仅累计在线搜索与回溯；JPS+ 静态表预处理不计',
       icon: Timer,
       showBest: true,
       value: (runner) => runner.cpuMs,
@@ -923,7 +1155,7 @@ function FinalTelemetry({
       id: 'queue',
       label: '峰值队列',
       unit: 'NODES',
-      note: '行为观测 · JPS 按跳点前沿计',
+      note: '行为观测 · 跳点算法与完整积分场的队列口径不同',
       icon: Waypoints,
       showBest: false,
       value: (runner) => runner.openPeak,
@@ -943,7 +1175,7 @@ function FinalTelemetry({
         </div>
         <div className={`final-report-stamp ${completedRoutes === 0 ? 'is-failed' : ''}`}>
           <span>ROUTE STATUS</span>
-          <strong>{completedRoutes > 0 ? `${completedRoutes}/${ALGORITHM_COUNT} LOCKED` : 'NO ROUTE'}</strong>
+          <strong>{completedRoutes > 0 ? `${completedRoutes}/${algorithms.length} LOCKED` : 'NO ROUTE'}</strong>
         </div>
       </header>
 
@@ -957,7 +1189,7 @@ function FinalTelemetry({
         </div>
         <div className="final-ranking-track" role="list">
           {finishOrder.map((id, index) => {
-            const algorithm = ALGORITHMS.find((item) => item.id === id)
+            const algorithm = algorithms.find((item) => item.id === id)
             const runner = runnerById.get(id)
             if (!algorithm || !runner) return null
             const succeeded = runner.status === 'complete'
@@ -1092,11 +1324,13 @@ function FinalTelemetry({
 function BenchmarkSidebar({
   scenario,
   runners,
+  algorithms,
   phase,
   visualTick,
 }: {
   scenario: Scenario
   runners: SearchRunner[]
+  algorithms: AlgorithmMeta[]
   phase: Phase
   visualTick: number
 }) {
@@ -1118,7 +1352,7 @@ function BenchmarkSidebar({
         <div className="telemetry-hero">
           <div>
             <span>逻辑调度</span>
-            <strong>{Array.from({ length: ALGORITHM_COUNT }, () => '1').join(' : ')}</strong>
+            <strong>{Array.from({ length: algorithms.length }, () => '1').join(' : ')}</strong>
           </div>
           <Zap size={26} />
         </div>
@@ -1145,7 +1379,7 @@ function BenchmarkSidebar({
       <section className="panel-section ranking-section">
         <SectionTitle index="RANK" title="扩展量对比" accessory="越少越好" />
         <div className="ranking-list">
-          {ALGORITHMS.map((algorithm) => {
+          {algorithms.map((algorithm) => {
             const runner = runners.find((item) => item.id === algorithm.id)
             if (!runner) return null
             return (
@@ -1175,7 +1409,7 @@ function BenchmarkSidebar({
           <div className="live-table-head" role="row">
             <span>算法</span><span>扩展</span><span>计算 ms</span><span>代价</span>
           </div>
-          {ALGORITHMS.map((algorithm) => {
+          {algorithms.map((algorithm) => {
             const runner = runners.find((item) => item.id === algorithm.id)
             if (!runner) return null
             return (
@@ -1197,12 +1431,12 @@ function BenchmarkSidebar({
         </div>
         {phase === 'complete' && bestExpanded && bestCpu ? (
           <p>
-            本轮单次观测中，<strong>{algorithmName(bestExpanded.id)}</strong> 扩展节点最少；
+            本轮单次观测中，<strong>{algorithmName(bestExpanded.id)}</strong> 扩展搜索单元最少；
             <strong>{algorithmName(bestCpu.id)}</strong> 累计计算耗时最低。
             {failed.length > 0 && ` ${failed.length} 个算法未找到完整路线。`}
           </p>
         ) : phase === 'complete' && failed.length > 0 ? (
-          <p>{ALGORITHM_COUNT} 种算法均在第 {failed[0].segmentIndex + 1} 航段判定无可行路径，请返回编辑调整障碍或节点。</p>
+          <p>{algorithms.length} 种算法均在第 {failed[0].segmentIndex + 1} 航段判定无可行路径，请返回编辑调整障碍或节点。</p>
         ) : (
           <p>算法完成后自动生成本轮对比摘要。</p>
         )}
@@ -1210,7 +1444,7 @@ function BenchmarkSidebar({
 
       <div className="method-note">
         <Info size={14} />
-        <p><strong>统计口径</strong>耗时仅累计算法步骤与回溯计算，不含动画、暂停和 Canvas 绘制；单次结果可能受 JIT 与系统调度影响。</p>
+        <p><strong>统计口径</strong>耗时仅累计在线搜索与回溯，不含 JPS+ 静态表预处理、动画、暂停和 Canvas 绘制；Flow Field 会生成完整目标积分场。</p>
       </div>
     </aside>
   )
@@ -1220,6 +1454,7 @@ function PlaybackBar({
   phase,
   speed,
   completedCount,
+  algorithmCount,
   routeLength,
   visualTick,
   onSpeedChange,
@@ -1230,6 +1465,7 @@ function PlaybackBar({
   phase: Phase
   speed: number
   completedCount: number
+  algorithmCount: number
   routeLength: number
   visualTick: number
   onSpeedChange: (speed: number) => void
@@ -1241,7 +1477,7 @@ function PlaybackBar({
     <div className="playback-dock">
       <div className="playback-context">
         <span>SYNC CONTROL</span>
-        <strong>{completedCount}/{ALGORITHM_COUNT} 结束 · {routeLength} 航段</strong>
+        <strong>{completedCount}/{algorithmCount} 结束 · {routeLength} 航段</strong>
       </div>
       <div className="transport-controls">
         <button onClick={onRestart} aria-label="重新运行">

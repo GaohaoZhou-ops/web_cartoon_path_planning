@@ -4,6 +4,15 @@ from playwright.sync_api import sync_playwright
 
 BASE_URL = "http://127.0.0.1:5173"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+DESKTOP_ALGORITHM_IDS = (
+    "astar",
+    "bidirectional-astar",
+    "theta",
+    "jps-plus",
+    "dstar-lite",
+    "flow-field",
+)
+CORE_ALGORITHM_IDS = ("astar", "jps", "dijkstra", "bfs", "greedy")
 
 
 def cell_center(box, cols, rows, x, y):
@@ -20,6 +29,15 @@ def expanded_by_algorithm(page):
         )
         for card in page.locator(".algorithm-card").all()
     }
+
+
+def picker_selected_ids(dialog):
+    return [
+        button.get_attribute("data-picker-algorithm-id")
+        for button in dialog.locator(
+            '[data-picker-algorithm-id][aria-pressed="true"]'
+        ).all()
+    ]
 
 
 def stub_external_fonts(context):
@@ -66,7 +84,9 @@ with sync_playwright() as playwright:
     page.screenshot(path="/tmp/route-lab-edit.png", full_page=True)
     assert page.title() == "ROUTE/LAB · 路径规划观测台"
     assert page.locator("canvas.grid-canvas").count() == 1
-    assert page.get_by_role("button", name="锁定并开始").is_enabled()
+    assert page.get_by_role(
+        "button", name="选择算法并开始", exact=True
+    ).is_enabled()
 
     # Edit the actual canvas: add one waypoint and verify fast drag interpolation.
     canvas = page.locator("canvas.grid-canvas")
@@ -86,11 +106,33 @@ with sync_playwright() as playwright:
     page.mouse.up()
     assert page.locator(".readout").nth(2).locator("strong").inner_text() == "059"
 
-    # Start all five runners from the frozen scenario and verify live telemetry.
-    page.get_by_role("button", name="锁定并开始").click()
+    # Choose a six-runner formation, including every newly added algorithm.
+    selected_count = len(DESKTOP_ALGORITHM_IDS)
+    page.get_by_role("button", name="选择算法并开始", exact=True).click()
+    picker = page.get_by_role("dialog", name="选择本轮执行算法", exact=True)
+    picker.wait_for(state="visible")
+    picker.screenshot(path="/tmp/route-lab-picker.png")
+    picker.get_by_role("button", name="清空", exact=True).click()
+    picker_confirm = picker.locator(".algorithm-picker-confirm")
+    assert picker_selected_ids(picker) == []
+    assert picker_confirm.is_disabled()
+    assert "运行 0 个算法" in picker_confirm.inner_text()
+
+    for algorithm_id in DESKTOP_ALGORITHM_IDS:
+        option = picker.locator(
+            f'[data-picker-algorithm-id="{algorithm_id}"]'
+        )
+        assert option.get_attribute("aria-pressed") == "false"
+        option.click()
+
+    assert picker_selected_ids(picker) == list(DESKTOP_ALGORITHM_IDS)
+    assert picker_confirm.is_enabled()
+    assert f"运行 {selected_count} 个算法" in picker_confirm.inner_text()
+    picker_confirm.click()
     page.wait_for_selector(".algorithm-card")
-    assert page.locator(".algorithm-card").count() == 5
-    assert page.locator("canvas.grid-canvas").count() == 5
+    assert page.locator(".algorithm-card").count() == selected_count
+    assert page.locator("canvas.grid-canvas").count() == selected_count
+    assert set(expanded_by_algorithm(page)) == set(DESKTOP_ALGORITHM_IDS)
     page.wait_for_timeout(850)
     expanded_before_pause = expanded_by_algorithm(page)
     assert all(value > 0 for value in expanded_before_pause.values())
@@ -128,7 +170,7 @@ with sync_playwright() as playwright:
     assert flip_animation_count > 0, flip_animation_count
     page.wait_for_timeout(1400)
     first_rank_labels = page.locator(".algorithm-card .finish-rank").all_inner_texts()
-    assert 0 < len(first_rank_labels) < 5
+    assert 0 < len(first_rank_labels) < selected_count
     assert first_rank_labels == [f"#{rank:02d}" for rank in range(1, len(first_rank_labels) + 1)]
     locked_finishers = [
         page.locator(".algorithm-card").nth(index).get_attribute("data-algorithm-id")
@@ -154,7 +196,9 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="播放").click()
     page.wait_for_selector(".phase-indicator--complete", timeout=30_000)
     rank_labels = page.locator(".algorithm-card .finish-rank").all_inner_texts()
-    assert rank_labels == ["#01", "#02", "#03", "#04", "#05"]
+    assert rank_labels == [
+        f"#{rank:02d}" for rank in range(1, selected_count + 1)
+    ]
     assert [
         page.locator(".algorithm-card").nth(index).get_attribute("data-algorithm-id")
         for index in range(len(locked_finishers))
@@ -163,10 +207,11 @@ with sync_playwright() as playwright:
     # Final telemetry appears below all cards, animates its ranking, and mirrors card metrics.
     final_report = page.locator(".final-report")
     final_report.wait_for(state="visible")
-    assert page.locator(".final-rank-item").count() == 5
+    assert page.locator(".final-rank-item").count() == selected_count
     assert page.locator(".final-chart-card").count() == 4
     assert all(
-        page.locator(f'.final-chart-card[data-metric="{metric}"] .final-chart-row').count() == 5
+        page.locator(f'.final-chart-card[data-metric="{metric}"] .final-chart-row').count()
+        == selected_count
         for metric in ("expansions", "cpu", "cost", "queue")
     )
     ranking_animation = page.locator(".final-rank-item").first.evaluate(
@@ -222,7 +267,16 @@ with sync_playwright() as playwright:
     page.mouse.move(*wall_end, steps=1)
     page.mouse.up()
     assert page.locator(".readout").nth(2).locator("strong").inner_text() == "015"
-    page.get_by_role("button", name="锁定并开始").click()
+    page.get_by_role("button", name="选择算法并开始", exact=True).click()
+    persisted_picker = page.get_by_role(
+        "dialog", name="选择本轮执行算法", exact=True
+    )
+    persisted_picker.wait_for(state="visible")
+    assert picker_selected_ids(persisted_picker) == list(DESKTOP_ALGORITHM_IDS)
+    persisted_confirm = persisted_picker.locator(".algorithm-picker-confirm")
+    assert persisted_confirm.is_enabled()
+    assert f"运行 {selected_count} 个算法" in persisted_confirm.inner_text()
+    persisted_confirm.click()
     page.get_by_role("button", name="8×", exact=True).click()
     page.wait_for_selector(".phase-indicator--complete", timeout=30_000)
     assert "路线不可达" in page.locator(".analysis-callout-title").inner_text()
@@ -231,7 +285,7 @@ with sync_playwright() as playwright:
     failed_cost_rows = page.locator(
         '.final-chart-card[data-metric="cost"] .final-chart-row[data-status="failed"]'
     )
-    assert failed_cost_rows.count() == 5
+    assert failed_cost_rows.count() == selected_count
     assert all(row.get_attribute("data-value") is None for row in failed_cost_rows.all())
     assert "NaN" not in page.locator(".final-report").inner_text()
     assert "Infinity" not in page.locator(".final-report").inner_text()
@@ -253,7 +307,9 @@ with sync_playwright() as playwright:
         "({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth })"
     )
     assert dimensions["scroll"] <= dimensions["inner"] + 1, dimensions
-    assert mobile.get_by_role("button", name="锁定并开始").is_visible()
+    assert mobile.get_by_role(
+        "button", name="选择算法并开始", exact=True
+    ).is_visible()
     assert mobile.locator(".route-section").is_visible()
     assert mobile.locator(".movement-section").is_visible()
     touch_action = mobile.locator("canvas.grid-canvas").evaluate(
@@ -261,13 +317,41 @@ with sync_playwright() as playwright:
     )
     assert "pan-y" in touch_action, touch_action
 
-    mobile.get_by_role("button", name="锁定并开始").click()
+    mobile.get_by_role("button", name="选择算法并开始", exact=True).click()
+    mobile_picker = mobile.get_by_role(
+        "dialog", name="选择本轮执行算法", exact=True
+    )
+    mobile_picker.wait_for(state="visible")
+    mobile.wait_for_timeout(500)
+    mobile.screenshot(path="/tmp/route-lab-picker-mobile.png")
+    mobile_picker_dimensions = mobile.evaluate(
+        "({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth })"
+    )
+    assert (
+        mobile_picker_dimensions["scroll"] <= mobile_picker_dimensions["inner"] + 1
+    ), mobile_picker_dimensions
+    mobile_picker.get_by_role("button", name="仅基础", exact=True).click()
+    mobile_selected_count = len(CORE_ALGORITHM_IDS)
+    assert picker_selected_ids(mobile_picker) == list(CORE_ALGORITHM_IDS)
+    mobile_confirm = mobile_picker.locator(".algorithm-picker-confirm")
+    assert f"运行 {mobile_selected_count} 个算法" in mobile_confirm.inner_text()
+    mobile_confirm.click()
     mobile.wait_for_selector(".algorithm-card")
+    assert mobile.locator(".algorithm-card").count() == mobile_selected_count
+    assert mobile.locator("canvas.grid-canvas").count() == mobile_selected_count
     assert mobile.locator(".ranking-section").is_visible()
     assert "扩展" in mobile.locator(".live-table-head").inner_text()
     mobile.get_by_role("button", name="8×", exact=True).click()
     mobile.wait_for_selector(".phase-indicator--complete", timeout=30_000, state="attached")
     mobile.wait_for_selector(".final-report")
+    assert mobile.locator(".final-rank-item").count() == mobile_selected_count
+    assert all(
+        mobile.locator(
+            f'.final-chart-card[data-metric="{metric}"] .final-chart-row'
+        ).count()
+        == mobile_selected_count
+        for metric in ("expansions", "cpu", "cost", "queue")
+    )
     mobile.wait_for_timeout(1400)
     final_mobile_dimensions = mobile.evaluate(
         "({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth })"
@@ -279,7 +363,7 @@ with sync_playwright() as playwright:
     print(
         {
             "editing_canvas": 1,
-            "comparison_canvases": 5,
+            "comparison_canvases": selected_count,
             "expanded_after_850ms": expanded_before_pause,
             "single_step": stepped_values,
             "auto_scroll": auto_scroll_state,
@@ -287,6 +371,8 @@ with sync_playwright() as playwright:
             "flip_animations": flip_animation_count,
             "final_charts": 4,
             "mobile_width": dimensions,
+            "mobile_picker_width": mobile_picker_dimensions,
+            "mobile_algorithms": mobile_selected_count,
             "final_mobile_width": final_mobile_dimensions,
             "mobile_touch_action": touch_action,
             "unreachable_summary": "passed",
