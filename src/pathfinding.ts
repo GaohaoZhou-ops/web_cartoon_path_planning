@@ -1,3 +1,10 @@
+import {
+  createLocalPlannerState,
+  stepLocalPlanner,
+  type LocalPlannerId,
+  type LocalPlannerState,
+} from './localPlanners'
+
 export const GRID_COLS = 24
 export const GRID_ROWS = 15
 
@@ -15,9 +22,59 @@ export type AlgorithmId =
   | 'field-dstar'
   | 'lpa-star'
   | 'ad-star'
+  | 'hpa-star'
+  | 'hybrid-astar'
+  | 'state-lattice'
+  | 'fast-marching'
   | 'rrt-star'
   | 'prm'
+  | 'teb'
+  | 'dwa'
+  | 'vfh'
+  | 'potential-field'
+  | 'trajopt'
 export type RunnerStatus = 'ready' | 'running' | 'complete' | 'failed'
+
+export type AlgorithmCategoryId =
+  | 'static-grid'
+  | 'dynamic-replanning'
+  | 'game-pathfinding'
+  | 'continuous-navigation'
+  | 'local-trajectory'
+
+export interface AlgorithmCategory {
+  id: AlgorithmCategoryId
+  label: string
+  description: string
+}
+
+export const ALGORITHM_CATEGORIES: AlgorithmCategory[] = [
+  {
+    id: 'static-grid',
+    label: '静态网格搜索',
+    description: '在固定占据栅格上比较启发式、剪枝与任意角搜索',
+  },
+  {
+    id: 'dynamic-replanning',
+    label: '动态环境与重新规划',
+    description: '复用历史搜索状态，应对局部代价或障碍变化',
+  },
+  {
+    id: 'game-pathfinding',
+    label: '游戏寻路',
+    description: '面向重复查询、大规模单位与层级地图的路径规划',
+  },
+  {
+    id: 'continuous-navigation',
+    label: '连续空间与机器人导航',
+    description: '考虑连续几何、运动朝向或数值到达时间场',
+  },
+  {
+    id: 'local-trajectory',
+    label: '局部避障与轨迹规划',
+    description: '根据局部环境生成速度控制或优化短时轨迹',
+  },
+]
 
 export interface Point {
   x: number
@@ -37,6 +94,7 @@ export interface Scenario {
 
 export interface AlgorithmMeta {
   id: AlgorithmId
+  category: AlgorithmCategoryId
   name: string
   shortName: string
   description: string
@@ -48,6 +106,7 @@ export interface AlgorithmMeta {
 export const ALGORITHMS: AlgorithmMeta[] = [
   {
     id: 'astar',
+    category: 'static-grid',
     name: 'A* Search',
     shortName: 'A*',
     description: '代价 + 启发式，兼顾方向与最优性',
@@ -57,6 +116,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'bidirectional-astar',
+    category: 'static-grid',
     name: 'Bidirectional A*',
     shortName: 'Bi-A*',
     description: '起终点双向推进，以平衡启发式证明最优会合',
@@ -66,6 +126,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'theta',
+    category: 'static-grid',
     name: 'Theta*',
     shortName: 'THETA',
     description: '通过视线松弛生成不限于网格边的任意角路径',
@@ -75,6 +136,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'jps',
+    category: 'game-pathfinding',
     name: 'Jump Point Search',
     shortName: 'JPS',
     description: '沿对称路径跳跃剪枝，快速定位关键转折',
@@ -84,6 +146,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'jps-plus',
+    category: 'game-pathfinding',
     name: 'Jump Point Search+',
     shortName: 'JPS+',
     description: '预计算静态跳点距离，加速重复路径查询',
@@ -93,6 +156,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'dijkstra',
+    category: 'static-grid',
     name: 'Dijkstra',
     shortName: 'DJK',
     description: '按累计代价向外均匀扩张',
@@ -102,6 +166,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'dstar-lite',
+    category: 'dynamic-replanning',
     name: 'D* Lite',
     shortName: 'D*L',
     description: '以 g/rhs 增量一致性从目标反向规划',
@@ -111,6 +176,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'flow-field',
+    category: 'game-pathfinding',
     name: 'Flow Field',
     shortName: 'FLOW',
     description: '构建目标积分场，为大量单位共享方向指引',
@@ -119,7 +185,18 @@ export const ALGORITHMS: AlgorithmMeta[] = [
     optimality: '积分场最优',
   },
   {
+    id: 'hpa-star',
+    category: 'game-pathfinding',
+    name: 'Hierarchical Pathfinding A*',
+    shortName: 'HPA*',
+    description: '先搜索分块层级走廊，再在局部网格中逐段细化',
+    accent: '#58d68d',
+    accentRgb: '88, 214, 141',
+    optimality: '层级走廊近优',
+  },
+  {
     id: 'bfs',
+    category: 'static-grid',
     name: 'Breadth-First',
     shortName: 'BFS',
     description: '逐层搜索，优先最少移动步数',
@@ -129,6 +206,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'greedy',
+    category: 'static-grid',
     name: 'Greedy Best-First',
     shortName: 'GBF',
     description: '只追逐目标，速度快但不保证最优',
@@ -138,6 +216,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'field-dstar',
+    category: 'dynamic-replanning',
     name: 'Field D*',
     shortName: 'FD*',
     description: '在反向增量值场上插值，生成连续折线路径',
@@ -147,6 +226,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'lpa-star',
+    category: 'dynamic-replanning',
     name: 'Lifelong Planning A*',
     shortName: 'LPA*',
     description: '以前向 g/rhs 一致性复用增量搜索状态',
@@ -156,6 +236,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'ad-star',
+    category: 'dynamic-replanning',
     name: 'Anytime Dynamic A*',
     shortName: 'AD*',
     description: '从快速有界解逐轮降低 ε，并以 INCONS 修复',
@@ -164,7 +245,38 @@ export const ALGORITHMS: AlgorithmMeta[] = [
     optimality: '任意时有界',
   },
   {
+    id: 'hybrid-astar',
+    category: 'continuous-navigation',
+    name: 'Hybrid A*',
+    shortName: 'HA*',
+    description: '在连续位姿上积分转向原语，并以离散朝向合并状态',
+    accent: '#35d0ba',
+    accentRgb: '53, 208, 186',
+    optimality: '运动学近优',
+  },
+  {
+    id: 'state-lattice',
+    category: 'continuous-navigation',
+    name: 'State Lattice',
+    shortName: 'LAT',
+    description: '在位置与朝向格点上搜索预计算的安全运动原语',
+    accent: '#8ce99a',
+    accentRgb: '140, 233, 154',
+    optimality: '格点原语近优',
+  },
+  {
+    id: 'fast-marching',
+    category: 'continuous-navigation',
+    name: 'Fast Marching Method',
+    shortName: 'FMM',
+    description: '反向求解 Eikonal 到达时间场，再沿下降方向提取路径',
+    accent: '#74c0fc',
+    accentRgb: '116, 192, 252',
+    optimality: 'Eikonal 数值近优',
+  },
+  {
     id: 'rrt-star',
+    category: 'continuous-navigation',
     name: 'RRT*',
     shortName: 'RRT*',
     description: '确定性混合采样、最优父选择与树重连',
@@ -174,6 +286,7 @@ export const ALGORITHMS: AlgorithmMeta[] = [
   },
   {
     id: 'prm',
+    category: 'continuous-navigation',
     name: 'Probabilistic Roadmap',
     shortName: 'PRM',
     description: '采样构建路线图，再执行图上的增量最短路查询',
@@ -181,7 +294,69 @@ export const ALGORITHMS: AlgorithmMeta[] = [
     accentRgb: '56, 217, 255',
     optimality: '采样路网最短',
   },
+  {
+    id: 'teb',
+    category: 'local-trajectory',
+    name: 'Timed Elastic Band',
+    shortName: 'TEB',
+    description: '以可行参考线初始化时空弹性带，联合优化形状与时间间隔',
+    accent: '#ff8fab',
+    accentRgb: '255, 143, 171',
+    optimality: '时空带局部优化',
+  },
+  {
+    id: 'dwa',
+    category: 'local-trajectory',
+    name: 'Dynamic Window Approach',
+    shortName: 'DWA',
+    description: '在速度动态窗口内滚动采样，并执行最优安全短轨迹',
+    accent: '#ffca3a',
+    accentRgb: '255, 202, 58',
+    optimality: '局部滚动优化',
+  },
+  {
+    id: 'vfh',
+    category: 'local-trajectory',
+    name: 'Vector Field Histogram',
+    shortName: 'VFH',
+    description: '构建局部极坐标障碍直方图，在安全方向谷中选择航向',
+    accent: '#2ec4b6',
+    accentRgb: '46, 196, 182',
+    optimality: '直方图局部避障',
+  },
+  {
+    id: 'potential-field',
+    category: 'local-trajectory',
+    name: 'Artificial Potential Field',
+    shortName: 'APF',
+    description: '叠加目标吸引力与障碍排斥力，并检测局部极小进行恢复',
+    accent: '#f77f00',
+    accentRgb: '247, 127, 0',
+    optimality: '势场局部引导',
+  },
+  {
+    id: 'trajopt',
+    category: 'local-trajectory',
+    name: 'Trajectory Optimization',
+    shortName: 'TrajOpt',
+    description: '以信赖域和碰撞代价迭代优化整条二维空间轨迹',
+    accent: '#c77dff',
+    accentRgb: '199, 125, 255',
+    optimality: '轨迹局部优化',
+  },
 ]
+
+const LOCAL_PLANNER_IDS = new Set<AlgorithmId>([
+  'teb',
+  'dwa',
+  'vfh',
+  'potential-field',
+  'trajopt',
+])
+
+function isLocalPlannerId(id: AlgorithmId): id is LocalPlannerId {
+  return LOCAL_PLANNER_IDS.has(id)
+}
 
 interface HeapNode {
   point: Point
@@ -189,6 +364,7 @@ interface HeapNode {
   secondary: number
   g: number
   order: number
+  stateKey?: string
 }
 
 class MinHeap {
@@ -273,8 +449,64 @@ interface SegmentSearch {
   lpaStar?: LpaStarSearch
   fieldDStar?: FieldDStarSearch
   adStar?: AdStarSearch
+  hpaStar?: HpaStarSearch
+  kinematic?: KinematicSearch
+  fastMarching?: FastMarchingSearch
+  localPlanner?: LocalPlannerState
   rrtStar?: RrtStarSearch
   prm?: PrmSearch
+}
+
+type HpaPhase = 'prepare' | 'abstract' | 'corridor' | 'fallback'
+
+interface HpaStarSearch {
+  phase: HpaPhase
+  clusterSize: number
+  clusterCols: number
+  clusterRows: number
+  adjacency: Map<string, Map<string, number>>
+  representatives: Map<string, Point>
+  abstractHeap: MinHeap
+  abstractOpen: Set<string>
+  abstractClosed: Set<string>
+  abstractG: Map<string, number>
+  abstractParent: Map<string, string>
+  abstractOrder: number
+  corridor: Set<string>
+  fallbackUsed: boolean
+}
+
+interface KinematicNode {
+  key: string
+  point: Point
+  theta: number
+  g: number
+  geometricCost: number
+  parentKey: string | null
+  motion: Point[]
+  steering: number
+  gear: 1 | -1
+}
+
+interface KinematicSearch {
+  mode: 'hybrid' | 'lattice'
+  headingBins: number
+  heap: MinHeap
+  nodes: Map<string, KinematicNode>
+  openKeys: Set<string>
+  closedKeys: Set<string>
+  insertionOrder: number
+}
+
+interface HybridGoalConnector {
+  points: Point[]
+  theta: number
+  gear: 1 | -1
+}
+
+interface FastMarchingSearch {
+  arrival: Map<string, number>
+  state: Map<string, 'narrow' | 'frozen'>
 }
 
 interface DirectionSearch {
@@ -495,6 +727,7 @@ export interface SearchRunner {
   scenarioConfig: Pick<Scenario, 'cols' | 'rows' | 'allowDiagonal' | 'preventCornerCutting'>
   visualPreparationMs: number
   prmRoadmap?: PrmRoadmap
+  kinematicArrival?: { theta: number; gear: 1 | -1 }
 }
 
 export const pointKey = (point: Point) => `${point.x},${point.y}`
@@ -562,7 +795,8 @@ function initializeSegment(runner: SearchRunner, scenario: Scenario) {
     runner.id === 'dstar-lite' ||
     runner.id === 'flow-field' ||
     runner.id === 'field-dstar' ||
-    runner.id === 'ad-star'
+    runner.id === 'ad-star' ||
+    runner.id === 'fast-marching'
   const root = reverseSearch ? target : start
   const rootKey = pointKey(root)
   const heap = new MinHeap()
@@ -586,7 +820,14 @@ function initializeSegment(runner: SearchRunner, scenario: Scenario) {
     return
   }
 
-  if ((runner.id === 'rrt-star' || runner.id === 'prm') && !scenario.allowDiagonal) {
+  if (
+    (runner.id === 'rrt-star' ||
+      runner.id === 'prm' ||
+      runner.id === 'hybrid-astar' ||
+      runner.id === 'state-lattice' ||
+      isLocalPlannerId(runner.id)) &&
+    !scenario.allowDiagonal
+  ) {
     failRunner(runner, '连续空间规划器需要启用斜向移动')
     return
   }
@@ -682,6 +923,43 @@ function initializeSegment(runner: SearchRunner, scenario: Scenario) {
     }
     insertAdStar(segment, target, scenario)
     runner.anytime = { epsilon: 2.5, firstSolutionCpuMs: null, rounds: 0, history: [] }
+  } else if (runner.id === 'hpa-star') {
+    segment.heap = new MinHeap()
+    segment.openKeys.clear()
+    segment.discovered.clear()
+    segment.gScore.clear()
+    segment.hpaStar = createHpaStarState(scenario)
+  } else if (runner.id === 'hybrid-astar' || runner.id === 'state-lattice') {
+    segment.heap = new MinHeap()
+    segment.openKeys.clear()
+    segment.discovered.clear()
+    segment.gScore.clear()
+    segment.kinematic = createKinematicState(
+      runner.id === 'hybrid-astar' ? 'hybrid' : 'lattice',
+      start,
+      target,
+      runner.kinematicArrival?.theta,
+    )
+  } else if (runner.id === 'fast-marching') {
+    segment.heap = new MinHeap()
+    segment.openKeys = new Set([pointKey(target)])
+    segment.closedKeys.clear()
+    segment.discovered = new Set([pointKey(target)])
+    segment.gScore = new Map([[pointKey(target), 0]])
+    segment.cameFrom.clear()
+    segment.fastMarching = {
+      arrival: segment.gScore,
+      state: new Map([[pointKey(target), 'narrow']]),
+    }
+    segment.heap.push({ point: target, priority: 0, secondary: 0, g: 0, order: 0 })
+  } else if (isLocalPlannerId(runner.id)) {
+    segment.heap = new MinHeap()
+    segment.openKeys = new Set([pointKey(start)])
+    segment.closedKeys.clear()
+    segment.discovered = new Set([pointKey(start)])
+    segment.gScore = new Map([[pointKey(start), 0]])
+    segment.cameFrom.clear()
+    segment.localPlanner = createLocalPlannerState(runner.id, start, target, scenario)
   } else if (runner.id === 'rrt-star') {
     segment.heap = new MinHeap()
     segment.openKeys.clear()
@@ -724,6 +1002,8 @@ function initializeSegment(runner: SearchRunner, scenario: Scenario) {
   runner.frontier =
     segment.bidirectional
       ? new Set([...segment.openKeys, ...segment.bidirectional.reverse.openKeys])
+      : segment.kinematic
+        ? projectKinematicKeys(segment.kinematic, segment.kinematic.openKeys, scenario)
       : segment.openKeys
   const initialGenerated = segment.bidirectional
     ? 2
@@ -865,6 +1145,22 @@ function executeSearchStep(runner: SearchRunner, scenario: Scenario) {
     executeAdStarStep(runner, scenario)
     return
   }
+  if (runner.id === 'hpa-star') {
+    executeHpaStarStep(runner, scenario)
+    return
+  }
+  if (runner.id === 'hybrid-astar' || runner.id === 'state-lattice') {
+    executeKinematicStep(runner, scenario)
+    return
+  }
+  if (runner.id === 'fast-marching') {
+    executeFastMarchingStep(runner, scenario)
+    return
+  }
+  if (isLocalPlannerId(runner.id)) {
+    executeLocalPlannerStep(runner, scenario)
+    return
+  }
   if (runner.id === 'rrt-star') {
     executeRrtStarStep(runner, scenario)
     return
@@ -978,6 +1274,41 @@ function executeSearchStep(runner: SearchRunner, scenario: Scenario) {
 
   runner.openPeak = Math.max(runner.openPeak, segment.openKeys.size)
   runner.action = `展开 ${formatPoint(current)} · 更新 ${updated} 个邻居`
+}
+
+function executeLocalPlannerStep(runner: SearchRunner, scenario: Scenario) {
+  const state = runner.segment!.localPlanner!
+  const result = stepLocalPlanner(state, scenario)
+
+  runner.current = result.current
+  runner.relaxed = result.relaxed
+  for (const point of result.visited) runner.visited.add(pointKey(point))
+  runner.frontier = new Set(
+    result.frontier.map((point) =>
+      pointKey({
+        x: Math.max(0, Math.min(scenario.cols - 1, Math.round(point.x))),
+        y: Math.max(0, Math.min(scenario.rows - 1, Math.round(point.y))),
+      }),
+    ),
+  )
+  runner.previewPath = result.previewPath.length > 0 ? result.previewPath : undefined
+  runner.expansions += result.metrics.expansions
+  runner.generated += result.metrics.generated
+  runner.relaxations += result.metrics.relaxations
+  runner.openPeak = Math.max(runner.openPeak, result.metrics.openSize)
+  runner.action = result.action
+
+  if (result.status === 'failed') {
+    failRunner(runner, result.action)
+    return
+  }
+  if (result.status === 'complete') {
+    if (!result.path || result.pathCost === undefined) {
+      failRunner(runner, `第 ${runner.segmentIndex + 1} 段轨迹结果无效 · 无可行路径`)
+      return
+    }
+    commitSegment(runner, scenario, result.path, result.pathCost)
+  }
 }
 
 function executeBidirectionalStep(runner: SearchRunner, scenario: Scenario) {
@@ -2273,6 +2604,809 @@ function extractAdStarPath(segment: SegmentSearch, scenario: Scenario) {
   return pointKey(current) === targetKey ? path : null
 }
 
+const HPA_CLUSTER_SIZE = 5
+
+function createHpaStarState(scenario: Scenario): HpaStarSearch {
+  return {
+    phase: 'prepare',
+    clusterSize: HPA_CLUSTER_SIZE,
+    clusterCols: Math.ceil(scenario.cols / HPA_CLUSTER_SIZE),
+    clusterRows: Math.ceil(scenario.rows / HPA_CLUSTER_SIZE),
+    adjacency: new Map(),
+    representatives: new Map(),
+    abstractHeap: new MinHeap(),
+    abstractOpen: new Set(),
+    abstractClosed: new Set(),
+    abstractG: new Map(),
+    abstractParent: new Map(),
+    abstractOrder: 0,
+    corridor: new Set(),
+    fallbackUsed: false,
+  }
+}
+
+function hpaClusterPoint(point: Point, state: HpaStarSearch) {
+  return {
+    x: Math.floor(point.x / state.clusterSize),
+    y: Math.floor(point.y / state.clusterSize),
+  }
+}
+
+function buildHpaHierarchy(state: HpaStarSearch, scenario: Scenario) {
+  state.adjacency.clear()
+  state.representatives.clear()
+  for (let y = 0; y < scenario.rows; y += 1) {
+    for (let x = 0; x < scenario.cols; x += 1) {
+      const point = { x, y }
+      if (!isWalkable(point, scenario)) continue
+      const cluster = hpaClusterPoint(point, state)
+      const clusterKey = pointKey(cluster)
+      if (!state.representatives.has(clusterKey)) state.representatives.set(clusterKey, point)
+      if (!state.adjacency.has(clusterKey)) state.adjacency.set(clusterKey, new Map())
+
+      for (const neighbor of getNeighbors(point, scenario)) {
+        const neighborCluster = hpaClusterPoint(neighbor.point, state)
+        const neighborKey = pointKey(neighborCluster)
+        if (neighborKey === clusterKey) continue
+        const edges = state.adjacency.get(clusterKey)!
+        const clusterCost = euclidean(cluster, neighborCluster)
+        const known = edges.get(neighborKey) ?? Number.POSITIVE_INFINITY
+        if (clusterCost < known) edges.set(neighborKey, clusterCost)
+      }
+    }
+  }
+}
+
+function executeHpaStarStep(runner: SearchRunner, scenario: Scenario) {
+  const segment = runner.segment!
+  const state = segment.hpaStar!
+  if (state.phase === 'prepare') {
+    buildHpaHierarchy(state, scenario)
+    const startCluster = hpaClusterPoint(segment.start, state)
+    const startKey = pointKey(startCluster)
+    const targetCluster = hpaClusterPoint(segment.target, state)
+    state.abstractG.set(startKey, 0)
+    state.abstractOpen.add(startKey)
+    state.abstractHeap.push({
+      point: startCluster,
+      priority: heuristic(startCluster, targetCluster, scenario.allowDiagonal),
+      secondary: heuristic(startCluster, targetCluster, scenario.allowDiagonal),
+      g: 0,
+      order: state.abstractOrder++,
+    })
+    state.phase = 'abstract'
+    runner.current = null
+    runner.relaxed = []
+    runner.frontier = projectHpaClusters(state, state.abstractOpen)
+    runner.openPeak = Math.max(runner.openPeak, state.abstractOpen.size)
+    runner.action = `HPA* 构建 ${state.clusterCols}×${state.clusterRows} 层级地图 · 转入抽象搜索`
+    return
+  }
+  if (state.phase === 'abstract') {
+    executeHpaAbstractStep(runner, scenario)
+    return
+  }
+  executeHpaGridStep(runner, scenario)
+}
+
+function executeHpaAbstractStep(runner: SearchRunner, scenario: Scenario) {
+  const segment = runner.segment!
+  const state = segment.hpaStar!
+  let node: HeapNode | undefined
+  while (state.abstractHeap.size > 0) {
+    const candidate = state.abstractHeap.pop()!
+    const key = pointKey(candidate.point)
+    if (state.abstractClosed.has(key)) continue
+    const best = state.abstractG.get(key)
+    if (best === undefined || Math.abs(best - candidate.g) > 1e-9) continue
+    node = candidate
+    break
+  }
+  if (!node) {
+    beginHpaGridSearch(runner, scenario, null, true)
+    return
+  }
+
+  const current = node.point
+  const currentKey = pointKey(current)
+  const targetCluster = hpaClusterPoint(segment.target, state)
+  const targetKey = pointKey(targetCluster)
+  state.abstractOpen.delete(currentKey)
+  state.abstractClosed.add(currentKey)
+  const representative = state.representatives.get(currentKey) ?? hpaClusterRepresentative(current, state, scenario)
+  runner.current = representative
+  runner.relaxed = []
+  runner.visited.add(pointKey(representative))
+  runner.expansions += 1
+
+  if (currentKey === targetKey) {
+    const corridor = new Set<string>()
+    let key = currentKey
+    corridor.add(key)
+    while (state.abstractParent.has(key)) {
+      key = state.abstractParent.get(key)!
+      corridor.add(key)
+    }
+    state.corridor = corridor
+    beginHpaGridSearch(runner, scenario, corridor, false)
+    return
+  }
+
+  let updated = 0
+  for (const [neighborKey, edgeCost] of state.adjacency.get(currentKey) ?? []) {
+    if (state.abstractClosed.has(neighborKey)) continue
+    const tentative = node.g + edgeCost
+    const known = state.abstractG.get(neighborKey) ?? Number.POSITIVE_INFINITY
+    if (tentative + 1e-9 >= known) continue
+    const neighbor = keyPoint(neighborKey)
+    const firstDiscovery = !state.abstractG.has(neighborKey)
+    state.abstractG.set(neighborKey, tentative)
+    state.abstractParent.set(neighborKey, currentKey)
+    const h = heuristic(neighbor, targetCluster, scenario.allowDiagonal)
+    state.abstractHeap.push({
+      point: neighbor,
+      priority: tentative + h,
+      secondary: h,
+      g: tentative,
+      order: state.abstractOrder++,
+    })
+    state.abstractOpen.add(neighborKey)
+    if (firstDiscovery) runner.generated += 1
+    runner.relaxations += 1
+    runner.relaxed.push(
+      state.representatives.get(neighborKey) ?? hpaClusterRepresentative(neighbor, state, scenario),
+    )
+    updated += 1
+  }
+  runner.frontier = projectHpaClusters(state, state.abstractOpen)
+  runner.openPeak = Math.max(runner.openPeak, state.abstractOpen.size)
+  runner.action = `HPA* 展开分块 [${current.x},${current.y}] · 更新 ${updated} 条层级边`
+}
+
+function hpaClusterRepresentative(cluster: Point, state: HpaStarSearch, scenario: Scenario) {
+  return {
+    x: Math.min(
+      scenario.cols - 1,
+      cluster.x * state.clusterSize + Math.floor(state.clusterSize / 2),
+    ),
+    y: Math.min(
+      scenario.rows - 1,
+      cluster.y * state.clusterSize + Math.floor(state.clusterSize / 2),
+    ),
+  }
+}
+
+function projectHpaClusters(state: HpaStarSearch, keys: Set<string>) {
+  return new Set(
+    [...keys].map((key) => pointKey(state.representatives.get(key) ?? keyPoint(key))),
+  )
+}
+
+function beginHpaGridSearch(
+  runner: SearchRunner,
+  scenario: Scenario,
+  corridor: Set<string> | null,
+  fallback: boolean,
+) {
+  const segment = runner.segment!
+  const state = segment.hpaStar!
+  const startKey = pointKey(segment.start)
+  segment.heap = new MinHeap()
+  segment.openKeys = new Set([startKey])
+  segment.closedKeys.clear()
+  segment.discovered = new Set([startKey])
+  segment.gScore = new Map([[startKey, 0]])
+  segment.cameFrom.clear()
+  segment.insertionOrder = 1
+  const h = heuristic(segment.start, segment.target, scenario.allowDiagonal)
+  segment.heap.push({ point: segment.start, priority: h, secondary: h, g: 0, order: 0 })
+  state.phase = fallback ? 'fallback' : 'corridor'
+  state.fallbackUsed ||= fallback
+  if (corridor) state.corridor = corridor
+  runner.generated += 1
+  runner.current = null
+  runner.relaxed = []
+  runner.frontier = segment.openKeys
+  runner.openPeak = Math.max(runner.openPeak, segment.openKeys.size)
+  runner.action = fallback
+    ? 'HPA* 层级走廊未连通 · 启动可靠全局回退'
+    : `HPA* 锁定 ${state.corridor.size} 个分块走廊 · 开始局部细化`
+}
+
+function executeHpaGridStep(runner: SearchRunner, scenario: Scenario) {
+  const segment = runner.segment!
+  const state = segment.hpaStar!
+  const node = popNext(runner, segment)
+  if (!node) {
+    if (state.phase === 'corridor') {
+      beginHpaGridSearch(runner, scenario, null, true)
+    } else {
+      failRunner(runner, `第 ${runner.segmentIndex + 1} 段无可行路径`)
+    }
+    return
+  }
+
+  const current = node.point
+  const currentKey = pointKey(current)
+  segment.openKeys.delete(currentKey)
+  segment.closedKeys.add(currentKey)
+  runner.current = current
+  runner.relaxed = []
+  runner.visited.add(currentKey)
+  runner.expansions += 1
+  if (samePoint(current, segment.target)) {
+    finishSegment(runner, scenario, currentKey)
+    return
+  }
+
+  let updated = 0
+  for (const neighbor of getNeighbors(current, scenario)) {
+    const neighborKey = pointKey(neighbor.point)
+    if (segment.closedKeys.has(neighborKey)) continue
+    if (
+      state.phase === 'corridor' &&
+      !state.corridor.has(pointKey(hpaClusterPoint(neighbor.point, state)))
+    ) continue
+    const tentative = node.g + neighbor.cost
+    const known = segment.gScore.get(neighborKey) ?? Number.POSITIVE_INFINITY
+    if (tentative + 1e-9 >= known) continue
+    const firstDiscovery = !segment.discovered.has(neighborKey)
+    segment.discovered.add(neighborKey)
+    segment.gScore.set(neighborKey, tentative)
+    segment.cameFrom.set(neighborKey, currentKey)
+    const h = heuristic(neighbor.point, segment.target, scenario.allowDiagonal)
+    segment.heap.push({
+      point: neighbor.point,
+      priority: tentative + h,
+      secondary: h,
+      g: tentative,
+      order: segment.insertionOrder++,
+    })
+    segment.openKeys.add(neighborKey)
+    if (firstDiscovery) runner.generated += 1
+    runner.relaxations += 1
+    runner.relaxed.push(neighbor.point)
+    updated += 1
+  }
+  runner.frontier = segment.openKeys
+  runner.openPeak = Math.max(runner.openPeak, segment.openKeys.size)
+  runner.action = `${state.phase === 'fallback' ? 'HPA* 全局回退' : 'HPA* 走廊细化'} ${formatPoint(current)} · 更新 ${updated} 个邻居`
+}
+
+function createKinematicState(
+  mode: KinematicSearch['mode'],
+  start: Point,
+  target: Point,
+  initialTheta?: number,
+): KinematicSearch {
+  const headingBins = mode === 'hybrid' ? 16 : 4
+  const inferredTheta = initialTheta ?? Math.atan2(target.y - start.y, target.x - start.x)
+  const theta =
+    mode === 'hybrid' && initialTheta !== undefined
+      ? normalizeAngle(initialTheta)
+      : quantizeHeading(inferredTheta, headingBins)
+  const key = kinematicStateKey(start, theta, headingBins)
+  const startNode: KinematicNode = {
+    key,
+    point: { ...start },
+    theta,
+    g: 0,
+    geometricCost: 0,
+    parentKey: null,
+    motion: [],
+    steering: 0,
+    gear: 1,
+  }
+  const heap = new MinHeap()
+  heap.push({ point: start, priority: euclidean(start, target), secondary: euclidean(start, target), g: 0, order: 0, stateKey: key })
+  return {
+    mode,
+    headingBins,
+    heap,
+    nodes: new Map([[key, startNode]]),
+    openKeys: new Set([key]),
+    closedKeys: new Set(),
+    insertionOrder: 1,
+  }
+}
+
+function normalizeAngle(angle: number) {
+  let normalized = angle % (Math.PI * 2)
+  if (normalized >= Math.PI) normalized -= Math.PI * 2
+  if (normalized < -Math.PI) normalized += Math.PI * 2
+  return normalized
+}
+
+function headingIndex(theta: number, bins: number) {
+  const unit = Math.PI * 2 / bins
+  return ((Math.round(normalizeAngle(theta) / unit) % bins) + bins) % bins
+}
+
+function quantizeHeading(theta: number, bins: number) {
+  return normalizeAngle(headingIndex(theta, bins) * (Math.PI * 2 / bins))
+}
+
+function kinematicStateKey(point: Point, theta: number, bins: number) {
+  return `${Math.round(point.x)},${Math.round(point.y)},${headingIndex(theta, bins)}`
+}
+
+function projectKinematicKeys(
+  state: KinematicSearch,
+  keys: Set<string>,
+  scenario: Scenario,
+) {
+  const result = new Set<string>()
+  for (const key of keys) {
+    const node = state.nodes.get(key)
+    if (!node) continue
+    result.add(
+      pointKey({
+        x: Math.max(0, Math.min(scenario.cols - 1, Math.round(node.point.x))),
+        y: Math.max(0, Math.min(scenario.rows - 1, Math.round(node.point.y))),
+      }),
+    )
+  }
+  return result
+}
+
+function executeKinematicStep(runner: SearchRunner, scenario: Scenario) {
+  const segment = runner.segment!
+  const state = segment.kinematic!
+  let current: KinematicNode | undefined
+  while (state.heap.size > 0) {
+    const heapNode = state.heap.pop()!
+    const key = heapNode.stateKey
+    if (!key || state.closedKeys.has(key)) continue
+    const node = state.nodes.get(key)
+    if (!node || Math.abs(node.g - heapNode.g) > 1e-9) continue
+    state.openKeys.delete(key)
+    current = node
+    break
+  }
+  if (!current) {
+    failRunner(runner, `第 ${runner.segmentIndex + 1} 段无可行路径（运动学约束）`)
+    return
+  }
+
+  state.closedKeys.add(current.key)
+  runner.current = current.point
+  runner.relaxed = []
+  runner.visited.add(
+    pointKey({ x: Math.round(current.point.x), y: Math.round(current.point.y) }),
+  )
+  runner.expansions += 1
+
+  const connector =
+    state.mode === 'hybrid'
+      ? hybridGoalConnector(current, segment.target, scenario)
+      : samePoint(current.point, segment.target)
+        ? { points: [], theta: current.theta, gear: current.gear }
+        : null
+  if (connector) {
+    const path = reconstructKinematicPath(state, current.key, connector.points)
+    runner.kinematicArrival = { theta: connector.theta, gear: connector.gear }
+    commitSegment(runner, scenario, path, polylineCost(path))
+    return
+  }
+
+  const primitives =
+    state.mode === 'hybrid'
+      ? createHybridPrimitives(current, scenario)
+      : createLatticePrimitives(current, scenario)
+  let updated = 0
+  for (const primitive of primitives) {
+    const key = kinematicStateKey(primitive.point, primitive.theta, state.headingBins)
+    if (key === current.key || state.closedKeys.has(key)) continue
+    const reverseMultiplier = primitive.gear === -1 ? 1.22 : 1
+    const steeringPenalty =
+      state.mode === 'hybrid'
+        ? Math.abs(primitive.steering) * 0.08 + Math.abs(primitive.steering - current.steering) * 0.04
+        : Math.abs(primitive.steering) * 0.04
+    const tentative = current.g + primitive.cost * reverseMultiplier + steeringPenalty
+    const known = state.nodes.get(key)
+    if (known && tentative + 1e-9 >= known.g) continue
+    const node: KinematicNode = {
+      key,
+      point: primitive.point,
+      theta: primitive.theta,
+      g: tentative,
+      geometricCost: current.geometricCost + primitive.cost,
+      parentKey: current.key,
+      motion: primitive.motion,
+      steering: primitive.steering,
+      gear: primitive.gear,
+    }
+    const firstDiscovery = !known
+    state.nodes.set(key, node)
+    state.openKeys.add(key)
+    const h = euclidean(node.point, segment.target)
+    state.heap.push({
+      point: node.point,
+      priority: tentative + h,
+      secondary: h,
+      g: tentative,
+      order: state.insertionOrder++,
+      stateKey: key,
+    })
+    if (firstDiscovery) runner.generated += 1
+    runner.relaxations += 1
+    runner.relaxed.push(node.point)
+    updated += 1
+  }
+  runner.frontier = projectKinematicKeys(state, state.openKeys, scenario)
+  runner.openPeak = Math.max(runner.openPeak, state.openKeys.size)
+  runner.action = `${state.mode === 'hybrid' ? 'Hybrid A*' : 'State Lattice'} 展开 ${formatContinuousPoint(current.point)} · 更新 ${updated} 个姿态`
+}
+
+interface KinematicPrimitive {
+  point: Point
+  theta: number
+  motion: Point[]
+  cost: number
+  steering: number
+  gear: 1 | -1
+}
+
+function createHybridPrimitives(current: KinematicNode, scenario: Scenario) {
+  const result: KinematicPrimitive[] = []
+  for (const gear of [1, -1] as const) {
+    for (const curvature of [-0.68, 0, 0.68]) {
+      const steps = 8
+      const signedStep = gear / steps
+      let point = { ...current.point }
+      let theta = current.theta
+      const motion: Point[] = []
+      let valid = true
+      for (let step = 0; step < steps; step += 1) {
+        const middleTheta = theta + curvature * signedStep * 0.5
+        const next = {
+          x: point.x + signedStep * Math.cos(middleTheta),
+          y: point.y + signedStep * Math.sin(middleTheta),
+        }
+        if (!isContinuousEdgeFree(point, next, scenario)) {
+          valid = false
+          break
+        }
+        motion.push(next)
+        point = next
+        theta = normalizeAngle(theta + curvature * signedStep)
+      }
+      if (!valid || motion.length !== steps) continue
+      result.push({
+        point,
+        theta,
+        motion,
+        cost: 1,
+        steering: curvature,
+        gear,
+      })
+    }
+  }
+  return result
+}
+
+function createLatticePrimitives(current: KinematicNode, scenario: Scenario) {
+  const result: KinematicPrimitive[] = []
+  for (const gear of [1, -1] as const) {
+    for (const turn of [-1, 0, 1]) {
+      const distance = turn === 0 ? 1 : Math.PI / 2
+      const steps = turn === 0 ? 4 : 8
+      const motion: Point[] = []
+      let previous = current.point
+      let valid = true
+      for (let step = 1; step <= steps; step += 1) {
+        const travelled = gear * distance * (step / steps)
+        const next =
+          turn === 0
+            ? {
+                x: current.point.x + travelled * Math.cos(current.theta),
+                y: current.point.y + travelled * Math.sin(current.theta),
+              }
+            : {
+                x:
+                  current.point.x +
+                  (Math.sin(current.theta + turn * travelled) - Math.sin(current.theta)) / turn,
+                y:
+                  current.point.y +
+                  (-Math.cos(current.theta + turn * travelled) + Math.cos(current.theta)) / turn,
+              }
+        if (!isContinuousEdgeFree(previous, next, scenario)) {
+          valid = false
+          break
+        }
+        motion.push(next)
+        previous = next
+      }
+      if (!valid || motion.length !== steps) continue
+      const endpoint = {
+        x: Math.round(motion[motion.length - 1].x),
+        y: Math.round(motion[motion.length - 1].y),
+      }
+      if (
+        !isContinuousEdgeFree(motion[motion.length - 1], endpoint, scenario) ||
+        (motion.length > 1 && !isContinuousEdgeFree(motion[motion.length - 2], endpoint, scenario))
+      ) continue
+      motion[motion.length - 1] = endpoint
+      result.push({
+        point: endpoint,
+        theta: quantizeHeading(current.theta + turn * gear * Math.PI / 2, 4),
+        motion,
+        cost: distance,
+        steering: turn,
+        gear,
+      })
+    }
+  }
+  return result
+}
+
+function hybridGoalConnector(
+  current: KinematicNode,
+  target: Point,
+  scenario: Scenario,
+): HybridGoalConnector | null {
+  const distance = euclidean(current.point, target)
+  if (distance > 1.5) return null
+  if (distance <= 1e-9) {
+    return { points: [], theta: current.theta, gear: current.gear }
+  }
+
+  const candidates = ([1, -1] as const)
+    .map((gear) => buildHybridArcConnector(current, target, gear, scenario))
+    .filter((candidate): candidate is HybridGoalConnector & { length: number } => candidate !== null)
+  if (candidates.length === 0) return null
+  candidates.sort((left, right) => left.length - right.length || right.gear - left.gear)
+  const { length: _length, ...connector } = candidates[0]
+  return connector
+}
+
+function buildHybridArcConnector(
+  current: KinematicNode,
+  target: Point,
+  gear: 1 | -1,
+  scenario: Scenario,
+): (HybridGoalConnector & { length: number }) | null {
+  const travelHeading = normalizeAngle(current.theta + (gear === -1 ? Math.PI : 0))
+  const deltaX = target.x - current.point.x
+  const deltaY = target.y - current.point.y
+  const localX = Math.cos(travelHeading) * deltaX + Math.sin(travelHeading) * deltaY
+  const localY = -Math.sin(travelHeading) * deltaX + Math.cos(travelHeading) * deltaY
+  if (localX <= 1e-6) return null
+
+  const chordSquared = localX * localX + localY * localY
+  const curvature = (2 * localY) / chordSquared
+  if (Math.abs(curvature) > 0.68 + 1e-9) return null
+  const turnAngle = Math.abs(curvature) <= 1e-9 ? 0 : 2 * Math.atan2(localY, localX)
+  const length = Math.abs(curvature) <= 1e-9 ? localX : turnAngle / curvature
+  if (!Number.isFinite(length) || length <= 0 || length > 1.8) return null
+
+  const steps = Math.max(2, Math.ceil(length / 0.125))
+  const points: Point[] = []
+  let previous = current.point
+  for (let index = 1; index <= steps; index += 1) {
+    const travelled = length * (index / steps)
+    const localPoint =
+      Math.abs(curvature) <= 1e-9
+        ? { x: travelled, y: 0 }
+        : {
+            x: Math.sin(curvature * travelled) / curvature,
+            y: (1 - Math.cos(curvature * travelled)) / curvature,
+          }
+    const point =
+      index === steps
+        ? { ...target }
+        : {
+            x:
+              current.point.x +
+              Math.cos(travelHeading) * localPoint.x -
+              Math.sin(travelHeading) * localPoint.y,
+            y:
+              current.point.y +
+              Math.sin(travelHeading) * localPoint.x +
+              Math.cos(travelHeading) * localPoint.y,
+          }
+    if (!isContinuousEdgeFree(previous, point, scenario)) return null
+    points.push(point)
+    previous = point
+  }
+  const finalTravelHeading = normalizeAngle(travelHeading + curvature * length)
+  return {
+    points,
+    theta: normalizeAngle(finalTravelHeading - (gear === -1 ? Math.PI : 0)),
+    gear,
+    length,
+  }
+}
+
+function reconstructKinematicPath(
+  state: KinematicSearch,
+  targetKey: string,
+  connector: Point[],
+) {
+  const chain: KinematicNode[] = []
+  let key: string | null = targetKey
+  const seen = new Set<string>()
+  while (key) {
+    if (seen.has(key)) break
+    seen.add(key)
+    const node = state.nodes.get(key)
+    if (!node) break
+    chain.push(node)
+    key = node.parentKey
+  }
+  chain.reverse()
+  const path: Point[] = chain.length > 0 ? [{ ...chain[0].point }] : []
+  for (let index = 1; index < chain.length; index += 1) {
+    for (const point of chain[index].motion) appendDistinctPoint(path, point)
+  }
+  for (const point of connector) appendDistinctPoint(path, point)
+  return path
+}
+
+function appendDistinctPoint(path: Point[], point: Point) {
+  if (path.length === 0 || euclidean(path[path.length - 1], point) > 1e-9) {
+    path.push({ ...point })
+  }
+}
+
+function executeFastMarchingStep(runner: SearchRunner, scenario: Scenario) {
+  const segment = runner.segment!
+  const state = segment.fastMarching!
+  let node: HeapNode | undefined
+  while (segment.heap.size > 0) {
+    const candidate = segment.heap.pop()!
+    const key = pointKey(candidate.point)
+    if (state.state.get(key) === 'frozen') continue
+    const best = state.arrival.get(key)
+    if (best === undefined || Math.abs(best - candidate.g) > 1e-9) continue
+    node = candidate
+    break
+  }
+  if (!node) {
+    failRunner(runner, `第 ${runner.segmentIndex + 1} 段无可行路径`)
+    return
+  }
+
+  const current = node.point
+  const currentKey = pointKey(current)
+  state.state.set(currentKey, 'frozen')
+  segment.openKeys.delete(currentKey)
+  segment.closedKeys.add(currentKey)
+  runner.current = current
+  runner.relaxed = []
+  runner.visited.add(currentKey)
+  runner.expansions += 1
+  if (samePoint(current, segment.start)) {
+    const path = extractFastMarchingPath(segment, scenario)
+    if (!path) {
+      failRunner(runner, `第 ${runner.segmentIndex + 1} 段 FMM 路径无法回溯`)
+      return
+    }
+    commitSegment(runner, scenario, path, polylineCost(path))
+    return
+  }
+
+  let updated = 0
+  for (const neighbor of getNeighbors(current, scenario)) {
+    const point = neighbor.point
+    const key = pointKey(point)
+    if (state.state.get(key) === 'frozen') continue
+    const arrival = solveFastMarchingArrival(point, segment, scenario)
+    if (!Number.isFinite(arrival)) continue
+    const known = state.arrival.get(key) ?? Number.POSITIVE_INFINITY
+    if (arrival + 1e-9 >= known) continue
+    const parent = fastMarchingDescentNeighbor(point, segment, scenario)
+    if (!parent) continue
+    const firstDiscovery = !state.arrival.has(key)
+    state.arrival.set(key, arrival)
+    state.state.set(key, 'narrow')
+    segment.cameFrom.set(key, pointKey(parent))
+    segment.openKeys.add(key)
+    segment.discovered.add(key)
+    segment.heap.push({
+      point,
+      priority: arrival,
+      secondary: euclidean(point, segment.start),
+      g: arrival,
+      order: segment.insertionOrder++,
+    })
+    if (firstDiscovery) runner.generated += 1
+    runner.relaxations += 1
+    runner.relaxed.push(point)
+    updated += 1
+  }
+  runner.frontier = segment.openKeys
+  runner.openPeak = Math.max(runner.openPeak, segment.openKeys.size)
+  runner.action = `FMM 冻结 ${formatPoint(current)} · 到达时间 ${node.g.toFixed(2)} · 更新 ${updated} 个窄带节点`
+}
+
+function frozenArrival(segment: SegmentSearch, point: Point) {
+  const key = pointKey(point)
+  return segment.fastMarching!.state.get(key) === 'frozen'
+    ? segment.fastMarching!.arrival.get(key) ?? Number.POSITIVE_INFINITY
+    : Number.POSITIVE_INFINITY
+}
+
+function solveFastMarchingArrival(point: Point, segment: SegmentSearch, scenario: Scenario) {
+  const horizontal = Math.min(
+    frozenArrival(segment, { x: point.x - 1, y: point.y }),
+    frozenArrival(segment, { x: point.x + 1, y: point.y }),
+  )
+  const vertical = Math.min(
+    frozenArrival(segment, { x: point.x, y: point.y - 1 }),
+    frozenArrival(segment, { x: point.x, y: point.y + 1 }),
+  )
+  let eikonal = Number.POSITIVE_INFINITY
+  if (Number.isFinite(horizontal) && Number.isFinite(vertical)) {
+    const difference = Math.abs(horizontal - vertical)
+    eikonal =
+      difference >= 1
+        ? Math.min(horizontal, vertical) + 1
+        : (horizontal + vertical + Math.sqrt(Math.max(0, 2 - difference * difference))) / 2
+  } else if (Number.isFinite(horizontal) || Number.isFinite(vertical)) {
+    eikonal = Math.min(horizontal, vertical) + 1
+  }
+
+  if (!scenario.allowDiagonal) return eikonal
+  let diagonal = Number.POSITIVE_INFINITY
+  for (const neighbor of getNeighbors(point, scenario)) {
+    if (neighbor.cost < Math.SQRT2 - 1e-9) continue
+    const arrival = frozenArrival(segment, neighbor.point)
+    if (Number.isFinite(arrival)) diagonal = Math.min(diagonal, arrival + Math.SQRT2)
+  }
+  return Math.min(eikonal, diagonal)
+}
+
+function fastMarchingDescentNeighbor(
+  point: Point,
+  segment: SegmentSearch,
+  scenario: Scenario,
+) {
+  let best: { point: Point; score: number } | null = null
+  for (const neighbor of getNeighbors(point, scenario)) {
+    const arrival = frozenArrival(segment, neighbor.point)
+    if (!Number.isFinite(arrival)) continue
+    const score = arrival + neighbor.cost
+    if (!best || score < best.score - 1e-9) best = { point: neighbor.point, score }
+  }
+  return best?.point ?? null
+}
+
+function extractFastMarchingPath(segment: SegmentSearch, scenario: Scenario) {
+  const targetKey = pointKey(segment.target)
+  const discrete = [{ ...segment.start }]
+  const seen = new Set([pointKey(segment.start)])
+  let key = pointKey(segment.start)
+  const limit = scenario.cols * scenario.rows + 1
+  while (key !== targetKey && discrete.length <= limit) {
+    const nextKey = segment.cameFrom.get(key)
+    if (!nextKey || seen.has(nextKey)) return null
+    seen.add(nextKey)
+    discrete.push(keyPoint(nextKey))
+    key = nextKey
+  }
+  if (key !== targetKey || !scenario.allowDiagonal) return key === targetKey ? discrete : null
+  return stringPullPath(discrete, scenario)
+}
+
+function stringPullPath(path: Point[], scenario: Scenario) {
+  if (path.length < 3) return path
+  const result = [{ ...path[0] }]
+  let anchor = 0
+  while (anchor < path.length - 1) {
+    let next = anchor + 1
+    while (
+      next + 1 < path.length &&
+      isContinuousEdgeFree(path[anchor], path[next + 1], scenario)
+    ) {
+      next += 1
+    }
+    result.push({ ...path[next] })
+    anchor = next
+  }
+  return result
+}
+
 function createRrtStarState(
   start: Point,
   target: Point,
@@ -3415,8 +4549,12 @@ function commitSegment(
     const pathUnit =
       runner.id === 'theta' ||
       runner.id === 'field-dstar' ||
+      runner.id === 'hybrid-astar' ||
+      runner.id === 'state-lattice' ||
+      runner.id === 'fast-marching' ||
       runner.id === 'rrt-star' ||
-      runner.id === 'prm'
+      runner.id === 'prm' ||
+      isLocalPlannerId(runner.id)
         ? '折线段'
         : '步'
     runner.action = `航路锁定 · ${runner.path.length - 1} ${pathUnit} / 代价 ${runner.pathCost.toFixed(2)}`
@@ -3572,14 +4710,20 @@ export function isContinuousPointFree(point: Point, scenario: Scenario) {
 export function isContinuousEdgeFree(start: Point, target: Point, scenario: Scenario) {
   if (!isContinuousPointFree(start, scenario) || !isContinuousPointFree(target, scenario)) return false
   const padding = scenario.preventCornerCutting ? -1e-9 : 1e-8
-  for (const key of scenario.obstacles) {
-    const obstacle = keyPoint(key)
-    const minX = obstacle.x - 0.5 + padding
-    const maxX = obstacle.x + 0.5 - padding
-    const minY = obstacle.y - 0.5 + padding
-    const maxY = obstacle.y + 0.5 - padding
-    if (minX > maxX || minY > maxY) continue
-    if (segmentIntersectsAabb(start, target, minX, maxX, minY, maxY)) return false
+  const firstX = Math.max(0, Math.floor(Math.min(start.x, target.x) - 0.5))
+  const lastX = Math.min(scenario.cols - 1, Math.ceil(Math.max(start.x, target.x) + 0.5))
+  const firstY = Math.max(0, Math.floor(Math.min(start.y, target.y) - 0.5))
+  const lastY = Math.min(scenario.rows - 1, Math.ceil(Math.max(start.y, target.y) + 0.5))
+  for (let y = firstY; y <= lastY; y += 1) {
+    for (let x = firstX; x <= lastX; x += 1) {
+      if (!scenario.obstacles.has(`${x},${y}`)) continue
+      const minX = x - 0.5 + padding
+      const maxX = x + 0.5 - padding
+      const minY = y - 0.5 + padding
+      const maxY = y + 0.5 - padding
+      if (minX > maxX || minY > maxY) continue
+      if (segmentIntersectsAabb(start, target, minX, maxX, minY, maxY)) return false
+    }
   }
   return true
 }

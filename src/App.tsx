@@ -30,6 +30,7 @@ import {
 } from 'lucide-react'
 import GridCanvas, { isRoutePoint, type EditTool } from './GridCanvas'
 import {
+  ALGORITHM_CATEGORIES,
   ALGORITHMS,
   cloneScenario,
   createRunner,
@@ -74,18 +75,27 @@ const SPEEDS = [0.5, 1, 2, 4, 8]
 const GRID_SIZE_AUTO_UPDATE_DELAY = 450
 const CORE_ALGORITHM_IDS: AlgorithmId[] = ['astar', 'jps', 'dijkstra', 'bfs', 'greedy']
 const NEW_ALGORITHM_IDS = new Set<AlgorithmId>([
-  'bidirectional-astar',
-  'theta',
-  'jps-plus',
-  'dstar-lite',
-  'flow-field',
-  'field-dstar',
-  'lpa-star',
-  'ad-star',
+  'hpa-star',
+  'hybrid-astar',
+  'state-lattice',
+  'fast-marching',
+  'teb',
+  'dwa',
+  'vfh',
+  'potential-field',
+  'trajopt',
+])
+const REQUIRES_DIAGONAL_IDS = new Set<AlgorithmId>([
   'rrt-star',
   'prm',
+  'hybrid-astar',
+  'state-lattice',
+  'teb',
+  'dwa',
+  'vfh',
+  'potential-field',
+  'trajopt',
 ])
-const CONTINUOUS_SAMPLING_IDS = new Set<AlgorithmId>(['rrt-star', 'prm'])
 
 function catalogOrder(ids: AlgorithmId[]) {
   const selected = new Set(ids)
@@ -287,7 +297,7 @@ export default function App() {
     if (!scenario.start || !scenario.end) return
     setDraftAlgorithmIds(
       catalogOrder(selectedAlgorithmIds).filter(
-        (id) => scenario.allowDiagonal || !CONTINUOUS_SAMPLING_IDS.has(id),
+        (id) => scenario.allowDiagonal || !REQUIRES_DIAGONAL_IDS.has(id),
       ),
     )
     setAlgorithmPickerOpen(true)
@@ -296,7 +306,7 @@ export default function App() {
   const startPlanning = (algorithmIds: AlgorithmId[]) => {
     if (!scenario.start || !scenario.end || algorithmIds.length === 0) return
     const orderedAlgorithmIds = catalogOrder(algorithmIds).filter(
-      (id) => scenario.allowDiagonal || !CONTINUOUS_SAMPLING_IDS.has(id),
+      (id) => scenario.allowDiagonal || !REQUIRES_DIAGONAL_IDS.has(id),
     )
     if (orderedAlgorithmIds.length === 0) return
     const frozen = cloneScenario(scenario)
@@ -423,7 +433,7 @@ export default function App() {
       {algorithmPickerOpen && (
         <AlgorithmPicker
           selectedIds={draftAlgorithmIds}
-          disabledIds={scenario.allowDiagonal ? [] : [...CONTINUOUS_SAMPLING_IDS]}
+          disabledIds={scenario.allowDiagonal ? [] : [...REQUIRES_DIAGONAL_IDS]}
           onSelectedIdsChange={setDraftAlgorithmIds}
           onCancel={() => setAlgorithmPickerOpen(false)}
           onConfirm={() => startPlanning(draftAlgorithmIds)}
@@ -452,6 +462,13 @@ function AlgorithmPicker({
   onCancelRef.current = onCancel
   const selectedSet = new Set(selectedIds)
   const disabledSet = new Set(disabledIds)
+  const enabledAlgorithmIds = ALGORITHMS.filter(
+    (algorithm) => !disabledSet.has(algorithm.id),
+  ).map((algorithm) => algorithm.id)
+  const disabledAlgorithmCount = ALGORITHMS.length - enabledAlgorithmIds.length
+  const allEnabledSelected =
+    enabledAlgorithmIds.length > 0 &&
+    enabledAlgorithmIds.every((id) => selectedSet.has(id))
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
@@ -492,6 +509,18 @@ function AlgorithmPicker({
     const next = new Set(selectedIds)
     if (next.has(id)) next.delete(id)
     else next.add(id)
+    onSelectedIdsChange(catalogOrder([...next]))
+  }
+  const toggleCategory = (categoryIds: AlgorithmId[]) => {
+    const enabledIds = categoryIds.filter((id) => !disabledSet.has(id))
+    if (enabledIds.length === 0) return
+    const next = new Set(selectedIds)
+    const categorySelected = enabledIds.every((id) => next.has(id))
+    enabledIds.forEach((id) => {
+      if (categorySelected) next.delete(id)
+      else next.add(id)
+    })
+    disabledSet.forEach((id) => next.delete(id))
     onSelectedIdsChange(catalogOrder([...next]))
   }
 
@@ -535,13 +564,28 @@ function AlgorithmPicker({
         </header>
 
         <div className="algorithm-picker-toolbar">
-          <div>
+          <div
+            className="algorithm-picker-selection-count"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
             <span>已选择</span>
             <strong>{String(selectedIds.length).padStart(2, '0')}</strong>
-            <small>/ {ALGORITHMS.length}</small>
+            <small>/ {enabledAlgorithmIds.length} 可运行</small>
+            {disabledAlgorithmCount > 0 && <small>· {ALGORITHMS.length} 总计</small>}
+            {disabledAlgorithmCount > 0 && (
+              <span className="sr-only">
+                {disabledAlgorithmCount} 个算法需要启用斜向移动后才能选择
+              </span>
+            )}
           </div>
           <div className="algorithm-picker-presets" aria-label="算法快捷选择">
-            <button type="button" onClick={() => selectPreset(ALGORITHMS.map((algorithm) => algorithm.id))}>
+            <button
+              type="button"
+              disabled={allEnabledSelected}
+              onClick={() => selectPreset(ALGORITHMS.map((algorithm) => algorithm.id))}
+            >
               全选
             </button>
             <button type="button" onClick={() => selectPreset(CORE_ALGORITHM_IDS)}>
@@ -553,42 +597,108 @@ function AlgorithmPicker({
           </div>
         </div>
 
-        <div className="algorithm-picker-grid" role="group" aria-label="可执行算法">
-          {ALGORITHMS.map((algorithm, index) => {
-            const selected = selectedSet.has(algorithm.id)
-            const disabled = disabledSet.has(algorithm.id)
+        <div
+          className="algorithm-picker-groups"
+          role="group"
+          aria-label="按应用场景分类的可执行算法"
+        >
+          {ALGORITHM_CATEGORIES.map((category, categoryIndex) => {
+            const categoryAlgorithms = ALGORITHMS.filter(
+              (algorithm) => algorithm.category === category.id,
+            )
+            const categoryIds = categoryAlgorithms.map((algorithm) => algorithm.id)
+            const enabledCategoryIds = categoryIds.filter((id) => !disabledSet.has(id))
+            const selectedCategoryCount = enabledCategoryIds.filter((id) =>
+              selectedSet.has(id),
+            ).length
+            const disabledCategoryCount = categoryIds.length - enabledCategoryIds.length
+            const allCategorySelected =
+              enabledCategoryIds.length > 0 &&
+              selectedCategoryCount === enabledCategoryIds.length
+            const titleId = `algorithm-picker-category-${category.id}`
+            const descriptionId = `${titleId}-description`
+            const toggleLabel = `${allCategorySelected ? '清除' : '全选'}${category.label}分类，已选 ${selectedCategoryCount} 项，可运行 ${enabledCategoryIds.length} 项${disabledCategoryCount > 0 ? `，${disabledCategoryCount} 项需八向移动` : ''}`
+
             return (
-              <button
-                className={`algorithm-picker-card ${selected ? 'is-selected' : ''} ${disabled ? 'is-disabled' : ''}`}
-                type="button"
-                key={algorithm.id}
-                aria-pressed={selected}
-                disabled={disabled}
-                data-picker-algorithm-id={algorithm.id}
-                onClick={() => toggleAlgorithm(algorithm.id)}
-                style={
-                  {
-                    '--accent': algorithm.accent,
-                    '--accent-rgb': algorithm.accentRgb,
-                  } as React.CSSProperties
-                }
+              <section
+                className="algorithm-picker-group"
+                key={category.id}
+                aria-labelledby={titleId}
+                aria-describedby={descriptionId}
+                data-picker-category-id={category.id}
               >
-                <span className="algorithm-picker-card-index">
-                  {String(index + 1).padStart(2, '0')}
-                </span>
-                <span className="algorithm-picker-card-copy">
-                  <span>
-                    <strong>{algorithm.name}</strong>
-                    {NEW_ALGORITHM_IDS.has(algorithm.id) && <em>新增</em>}
-                    {disabled && <em>需八向</em>}
-                  </span>
-                  <small>{algorithm.description}</small>
-                  <i>{algorithm.optimality}</i>
-                </span>
-                <span className="algorithm-picker-check" aria-hidden="true">
-                  {selected && <Check size={14} strokeWidth={3} />}
-                </span>
-              </button>
+                <header className="algorithm-picker-group-header">
+                  <div className="algorithm-picker-group-title">
+                    <span aria-hidden="true">
+                      {String(categoryIndex + 1).padStart(2, '0')}
+                    </span>
+                    <div>
+                      <h3 id={titleId}>{category.label}</h3>
+                      <p id={descriptionId}>{category.description}</p>
+                    </div>
+                  </div>
+                  <div className="algorithm-picker-group-actions">
+                    <span className="algorithm-picker-category-count">
+                      <strong>{selectedCategoryCount}/{enabledCategoryIds.length}</strong>
+                      <small> 可运行</small>
+                      {disabledCategoryCount > 0 && (
+                        <small> · {disabledCategoryCount} 需八向</small>
+                      )}
+                    </span>
+                    <button
+                      className={`algorithm-picker-category-toggle ${allCategorySelected ? 'is-complete' : ''}`}
+                      type="button"
+                      disabled={enabledCategoryIds.length === 0}
+                      aria-label={toggleLabel}
+                      data-picker-category-toggle={category.id}
+                      onClick={() => toggleCategory(categoryIds)}
+                    >
+                      {allCategorySelected ? '清除此类' : '全选本类'}
+                    </button>
+                  </div>
+                </header>
+
+                <div className="algorithm-picker-grid" role="group" aria-labelledby={titleId}>
+                  {categoryAlgorithms.map((algorithm) => {
+                    const selected = selectedSet.has(algorithm.id)
+                    const disabled = disabledSet.has(algorithm.id)
+                    const index = ALGORITHMS.findIndex((item) => item.id === algorithm.id)
+                    return (
+                      <button
+                        className={`algorithm-picker-card ${selected ? 'is-selected' : ''} ${disabled ? 'is-disabled' : ''}`}
+                        type="button"
+                        key={algorithm.id}
+                        aria-pressed={selected}
+                        disabled={disabled}
+                        data-picker-algorithm-id={algorithm.id}
+                        onClick={() => toggleAlgorithm(algorithm.id)}
+                        style={
+                          {
+                            '--accent': algorithm.accent,
+                            '--accent-rgb': algorithm.accentRgb,
+                          } as React.CSSProperties
+                        }
+                      >
+                        <span className="algorithm-picker-card-index">
+                          {String(index + 1).padStart(2, '0')}
+                        </span>
+                        <span className="algorithm-picker-card-copy">
+                          <span>
+                            <strong>{algorithm.name}</strong>
+                            {NEW_ALGORITHM_IDS.has(algorithm.id) && <em>新增</em>}
+                            {disabled && <em>需八向</em>}
+                          </span>
+                          <small>{algorithm.description}</small>
+                          <i>{algorithm.optimality}</i>
+                        </span>
+                        <span className="algorithm-picker-check" aria-hidden="true">
+                          {selected && <Check size={14} strokeWidth={3} />}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </section>
             )
           })}
         </div>
@@ -596,7 +706,7 @@ function AlgorithmPicker({
         <footer className="algorithm-picker-footer">
           <p>
             <Info size={13} />
-            Flow Field 计算完整积分场；RRT* / PRM 为连续空间采样器，需启用斜向移动。
+            标记“需八向”的连续与局部规划器须先启用斜向移动；Flow Field 计算完整积分场。
           </p>
           <div>
             <button className="algorithm-picker-cancel" type="button" onClick={onCancel}>
@@ -1076,7 +1186,7 @@ function EditorStage({
         </div>
         {ALGORITHMS.map((algorithm, index) => (
           <div className="manifest-item" key={algorithm.id} style={{ '--accent': algorithm.accent } as React.CSSProperties}>
-            <span className="manifest-index">0{index + 1}</span>
+            <span className="manifest-index">{String(index + 1).padStart(2, '0')}</span>
             <div>
               <strong>{algorithm.name}</strong>
               <small>{algorithm.description}</small>
@@ -1301,8 +1411,33 @@ function AlgorithmCard({
   const totalSegments = runner.route.length - 1
   const activeSegment = Math.min(runner.segmentIndex + 1, totalSegments)
   const workloadLabel =
-    algorithm.id === 'rrt-star' ? '接受节点' : algorithm.id === 'prm' ? '图扩展' : '扩展节点'
-  const peakLabel = algorithm.id === 'rrt-star' ? '树峰值' : '峰值队列'
+    algorithm.id === 'rrt-star'
+      ? '接受节点'
+      : algorithm.id === 'prm'
+        ? '图扩展'
+        : algorithm.id === 'hpa-star'
+          ? '层级扩展'
+          : algorithm.id === 'hybrid-astar' || algorithm.id === 'state-lattice'
+            ? '姿态扩展'
+            : algorithm.id === 'fast-marching'
+              ? '冻结节点'
+              : algorithm.id === 'teb' || algorithm.id === 'trajopt'
+                ? '目标评估'
+                : algorithm.id === 'dwa'
+                  ? '轨迹评估'
+                  : algorithm.id === 'vfh'
+                    ? '方向评估'
+                    : algorithm.id === 'potential-field'
+                      ? '势场评估'
+                      : '扩展节点'
+  const peakLabel =
+    algorithm.id === 'rrt-star'
+      ? '树峰值'
+      : algorithm.category === 'local-trajectory' ||
+          algorithm.id === 'hybrid-astar' ||
+          algorithm.id === 'state-lattice'
+        ? '候选峰值'
+        : '峰值队列'
   const displayedCost = runner.path.length ? runner.pathCost : runner.previewCost
   const footerDetail = runner.samplingStats
     ? `${runner.samplingStats.phase} · ${runner.samplingStats.accepted} 点 / ${runner.samplingStats.edges} 边`

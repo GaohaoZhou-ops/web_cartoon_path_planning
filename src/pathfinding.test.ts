@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ALGORITHM_CATEGORIES,
   ALGORITHMS,
   createRunner,
+  createSampleScenario,
   hasLineOfSight,
   isContinuousEdgeFree,
   pointKey,
@@ -65,7 +67,33 @@ function expectValidPath(runner: SearchRunner, map: Scenario) {
   expect(cost).toBeCloseTo(runner.pathCost, 8)
 }
 
+function expectContinuousPath(runner: SearchRunner, map: Scenario) {
+  expect(runner.status).toBe('complete')
+  expect(runner.path[0]).toEqual(map.start)
+  expect(runner.path[runner.path.length - 1]).toEqual(map.end)
+  let cost = 0
+  for (let index = 1; index < runner.path.length; index += 1) {
+    const previous = runner.path[index - 1]
+    const current = runner.path[index]
+    const edgeCost = Math.hypot(current.x - previous.x, current.y - previous.y)
+    expect(edgeCost).toBeGreaterThan(1e-9)
+    expect(isContinuousEdgeFree(previous, current, map)).toBe(true)
+    cost += edgeCost
+  }
+  expect(cost).toBeCloseTo(runner.pathCost, 8)
+}
+
 describe('incremental pathfinding runners', () => {
+  it('settles every planner on the default multi-waypoint scenario', () => {
+    const map = createSampleScenario()
+    for (const algorithm of ALGORITHMS) {
+      const runner = finish(createRunner(algorithm.id, map), map, 50_000)
+      expect(runner.status, algorithm.name).toBe('complete')
+      expect(runner.completedSegments, algorithm.name).toBe(map.waypoints.length + 1)
+      expect(Number.isFinite(runner.pathCost), algorithm.name).toBe(true)
+    }
+  })
+
   it('plans all ordered waypoint legs for every algorithm', () => {
     const waypoint: Point = { x: 2, y: 3 }
     const map = scenario({
@@ -509,9 +537,19 @@ describe('incremental pathfinding runners', () => {
     }
   })
 
-  it('requires any-angle movement for continuous sampling planners', () => {
+  it('requires any-angle movement for continuous and local planners', () => {
     const map = scenario({ allowDiagonal: false })
-    for (const id of ['rrt-star', 'prm'] as AlgorithmId[]) {
+    for (const id of [
+      'rrt-star',
+      'prm',
+      'hybrid-astar',
+      'state-lattice',
+      'teb',
+      'dwa',
+      'vfh',
+      'potential-field',
+      'trajopt',
+    ] as AlgorithmId[]) {
       const runner = createRunner(id, map)
       expect(runner.status).toBe('failed')
       expect(runner.action).toContain('需要启用斜向移动')
@@ -589,6 +627,245 @@ describe('incremental pathfinding runners', () => {
         expect(isContinuousEdgeFree(runner.path[index - 1], runner.path[index], map), id).toBe(true)
       }
     }
+  })
+
+  it('registers every planner in a declared algorithm category', () => {
+    const categories = new Set(ALGORITHM_CATEGORIES.map(({ id }) => id))
+    expect(categories.size).toBe(ALGORITHM_CATEGORIES.length)
+    for (const algorithm of ALGORITHMS) expect(categories.has(algorithm.category)).toBe(true)
+    expect(
+      Object.fromEntries(
+        ALGORITHM_CATEGORIES.map(({ id }) => [
+          id,
+          ALGORITHMS.filter((algorithm) => algorithm.category === id).length,
+        ]),
+      ),
+    ).toEqual({
+      'static-grid': 6,
+      'dynamic-replanning': 4,
+      'game-pathfinding': 4,
+      'continuous-navigation': 5,
+      'local-trajectory': 5,
+    })
+
+    expect(ALGORITHMS.find(({ id }) => id === 'hpa-star')?.category).toBe('game-pathfinding')
+    for (const id of ['hybrid-astar', 'state-lattice', 'fast-marching'] as AlgorithmId[]) {
+      expect(ALGORITHMS.find((algorithm) => algorithm.id === id)?.category).toBe(
+        'continuous-navigation',
+      )
+    }
+    for (const id of ['jps', 'jps-plus'] as AlgorithmId[]) {
+      expect(ALGORITHMS.find((algorithm) => algorithm.id === id)?.category).toBe(
+        'game-pathfinding',
+      )
+    }
+    for (const id of ['teb', 'dwa', 'vfh', 'potential-field', 'trajopt'] as AlgorithmId[]) {
+      expect(ALGORITHMS.find((algorithm) => algorithm.id === id)?.category).toBe(
+        'local-trajectory',
+      )
+    }
+  })
+
+  it('uses an HPA* cluster corridor and falls back globally when the abstraction is disconnected inside a block', () => {
+    const cols = 15
+    const rows = 10
+    const free = new Set<string>()
+    for (let x = 1; x <= 6; x += 1) free.add(`${x},1`)
+    for (let x = 8; x <= 13; x += 1) free.add(`${x},3`)
+    for (let y = 1; y <= 5; y += 1) free.add(`1,${y}`)
+    for (let y = 3; y <= 5; y += 1) free.add(`13,${y}`)
+    for (let x = 1; x <= 13; x += 1) free.add(`${x},5`)
+    const obstacles = new Set<string>()
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        if (!free.has(`${x},${y}`)) obstacles.add(`${x},${y}`)
+      }
+    }
+    const map = scenario({
+      cols,
+      rows,
+      start: { x: 1, y: 1 },
+      end: { x: 13, y: 3 },
+      obstacles,
+      allowDiagonal: false,
+    })
+    const runner = finish(createRunner('hpa-star', map), map, 20_000)
+    const state = (runner.segment as unknown as {
+      hpaStar?: { fallbackUsed: boolean; corridor: Set<string> }
+    })?.hpaStar
+
+    expect(runner.status).toBe('complete')
+    expect(state?.corridor.size).toBe(3)
+    expect(state?.fallbackUsed).toBe(true)
+    expectValidPath(runner, map)
+  })
+
+  it('produces deterministic collision-free pose paths for Hybrid A* and State Lattice', () => {
+    const waypoint: Point = { x: 2, y: 3 }
+    const map = scenario({
+      waypoints: [waypoint],
+      obstacles: new Set(['1,1', '1,2', '3,3', '4,3']),
+    })
+    for (const id of ['hybrid-astar', 'state-lattice'] as AlgorithmId[]) {
+      const first = finish(createRunner(id, map), map, 50_000)
+      const second = finish(createRunner(id, map), map, 50_000)
+      expectContinuousPath(first, map)
+      expect(first.completedSegments).toBe(2)
+      expect(first.path).toContainEqual(waypoint)
+      expect(first.path.some((point) => !Number.isInteger(point.x) || !Number.isInteger(point.y))).toBe(
+        true,
+      )
+      expect(second.path).toEqual(first.path)
+      expect(second.pathCost).toBeCloseTo(first.pathCost, 10)
+    }
+  })
+
+  it('uses curvature-bounded Hybrid A* goal connectors without lateral heading jumps', () => {
+    const map = scenario({
+      cols: 6,
+      rows: 6,
+      start: { x: 5, y: 1 },
+      end: { x: 0, y: 4 },
+      obstacles: new Set(['2,1']),
+    })
+    const runner = finish(createRunner('hybrid-astar', map), map, 50_000)
+    expectContinuousPath(runner, map)
+
+    let maximumTangentJump = 0
+    for (let index = 2; index < runner.path.length; index += 1) {
+      const first = Math.atan2(
+        runner.path[index - 1].y - runner.path[index - 2].y,
+        runner.path[index - 1].x - runner.path[index - 2].x,
+      )
+      const second = Math.atan2(
+        runner.path[index].y - runner.path[index - 1].y,
+        runner.path[index].x - runner.path[index - 1].x,
+      )
+      maximumTangentJump = Math.max(
+        maximumTangentJump,
+        Math.acos(Math.min(1, Math.abs(Math.cos(second - first)))),
+      )
+    }
+    expect(maximumTangentJump).toBeLessThan(0.2)
+  })
+
+  it('carries kinematic arrival heading across ordered waypoint legs', () => {
+    const waypoint = { x: 5, y: 0 }
+    const map = scenario({
+      cols: 6,
+      rows: 6,
+      start: { x: 0, y: 0 },
+      waypoints: [waypoint],
+      end: { x: 5, y: 5 },
+    })
+    for (const id of ['hybrid-astar', 'state-lattice'] as AlgorithmId[]) {
+      const runner = createRunner(id, map)
+      let steps = 0
+      while (runner.status === 'running' && runner.completedSegments === 0 && steps < 50_000) {
+        stepRunner(runner, map)
+        steps += 1
+      }
+      expect(runner.completedSegments, id).toBe(1)
+      const kinematic = runner.segment as unknown as {
+        kinematic?: {
+          nodes: Map<string, { theta: number; parentKey: string | null }>
+        }
+      }
+      const nextRoot = [...(kinematic.kinematic?.nodes.values() ?? [])].find(
+        (node) => node.parentKey === null,
+      )
+      expect(nextRoot, id).toBeDefined()
+      expect(Math.abs(Math.atan2(
+        Math.sin(nextRoot!.theta - runner.kinematicArrival!.theta),
+        Math.cos(nextRoot!.theta - runner.kinematicArrival!.theta),
+      )), id).toBeLessThan(1e-9)
+      finish(runner, map, 50_000)
+      expect(runner.status, id).toBe('complete')
+    }
+  })
+
+  it('rejects kinematic planners when continuous movement is disabled', () => {
+    const map = scenario({ allowDiagonal: false })
+    for (const id of ['hybrid-astar', 'state-lattice'] as AlgorithmId[]) {
+      const runner = createRunner(id, map)
+      expect(runner.status).toBe('failed')
+      expect(runner.action).toContain('需要启用斜向移动')
+    }
+  })
+
+  it('marches FMM backward with the first-order Eikonal update', () => {
+    const map = scenario({
+      cols: 2,
+      rows: 2,
+      start: { x: 1, y: 1 },
+      end: { x: 0, y: 0 },
+      allowDiagonal: false,
+    })
+    const runner = createRunner('fast-marching', map)
+    stepRunner(runner, map)
+    expect(runner.current).toEqual(map.end)
+    finish(runner, map)
+
+    expect(runner.status).toBe('complete')
+    expect(runner.segment?.gScore.get('1,1')).toBeCloseTo(1 + 1 / Math.sqrt(2), 8)
+    expectValidPath(runner, map)
+  })
+
+  it('keeps FMM corner connectivity aligned with the movement rules', () => {
+    const strict = scenario({
+      cols: 2,
+      rows: 2,
+      start: { x: 0, y: 0 },
+      end: { x: 1, y: 1 },
+      obstacles: new Set(['1,0', '0,1']),
+      preventCornerCutting: true,
+    })
+    const permissive = {
+      ...strict,
+      obstacles: new Set(strict.obstacles),
+      preventCornerCutting: false,
+    }
+    expect(finish(createRunner('fast-marching', strict), strict).status).toBe('failed')
+    const runner = finish(createRunner('fast-marching', permissive), permissive)
+    expectContinuousPath(runner, permissive)
+    expect(runner.pathCost).toBeCloseTo(Math.SQRT2, 8)
+  })
+
+  it('extracts a large serpentine FMM path without a quadratic final-step stall', () => {
+    const cols = 60
+    const rows = 60
+    const free = new Set<string>()
+    let end: Point = { x: 0, y: 0 }
+    for (let band = 0, y = 0; y < rows; band += 1, y += 2) {
+      for (let x = 0; x < cols; x += 1) free.add(`${x},${y}`)
+      const connectorX = band % 2 === 0 ? cols - 1 : 0
+      end = { x: connectorX, y }
+      if (y + 1 < rows) free.add(`${connectorX},${y + 1}`)
+    }
+    const obstacles = new Set<string>()
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) if (!free.has(`${x},${y}`)) obstacles.add(`${x},${y}`)
+    }
+    const map = scenario({
+      cols,
+      rows,
+      start: { x: 0, y: 0 },
+      end,
+      obstacles,
+    })
+    const runner = createRunner('fast-marching', map)
+    let steps = 0
+    let slowestStepMs = 0
+    while (runner.status === 'running' && steps < 5_000) {
+      const startedAt = performance.now()
+      stepRunner(runner, map)
+      slowestStepMs = Math.max(slowestStepMs, performance.now() - startedAt)
+      steps += 1
+    }
+
+    expect(steps).toBeLessThan(5_000)
+    expect(slowestStepMs).toBeLessThan(500)
+    expectContinuousPath(runner, map)
   })
 })
 

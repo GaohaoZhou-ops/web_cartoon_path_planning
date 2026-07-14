@@ -13,6 +13,31 @@ DESKTOP_ALGORITHM_IDS = (
     "prm",
 )
 CORE_ALGORITHM_IDS = ("astar", "jps", "dijkstra", "bfs", "greedy")
+ALGORITHM_CATEGORIES = {
+    "static-grid": (
+        "astar",
+        "bidirectional-astar",
+        "theta",
+        "dijkstra",
+        "bfs",
+        "greedy",
+    ),
+    "dynamic-replanning": (
+        "dstar-lite",
+        "field-dstar",
+        "lpa-star",
+        "ad-star",
+    ),
+    "game-pathfinding": ("jps", "jps-plus", "flow-field", "hpa-star"),
+    "continuous-navigation": (
+        "hybrid-astar",
+        "state-lattice",
+        "fast-marching",
+        "rrt-star",
+        "prm",
+    ),
+    "local-trajectory": ("teb", "dwa", "vfh", "potential-field", "trajopt"),
+}
 
 
 def cell_center(box, cols, rows, x, y):
@@ -310,18 +335,48 @@ with sync_playwright() as playwright:
     page.mouse.up()
     assert page.locator(".readout").nth(2).locator("strong").inner_text() == "059"
 
-    # Choose a six-runner formation, including every newly added algorithm.
+    # Verify the complete categorized catalog, then choose a six-runner formation.
     selected_count = len(DESKTOP_ALGORITHM_IDS)
     page.get_by_role("button", name="选择算法并开始", exact=True).click()
     picker = page.get_by_role("dialog", name="选择本轮执行算法", exact=True)
     picker.wait_for(state="visible")
-    assert picker.locator("[data-picker-algorithm-id]").count() == 15
+    assert picker.locator("[data-picker-algorithm-id]").count() == 24
+    for category_id, algorithm_ids in ALGORITHM_CATEGORIES.items():
+        category = picker.locator(
+            f'[data-picker-category-id="{category_id}"]'
+        )
+        assert category.count() == 1
+        assert [
+            option.get_attribute("data-picker-algorithm-id")
+            for option in category.locator("[data-picker-algorithm-id]").all()
+        ] == list(algorithm_ids)
     picker.screenshot(path="/tmp/route-lab-picker.png")
     picker.get_by_role("button", name="清空", exact=True).click()
     picker_confirm = picker.locator(".algorithm-picker-confirm")
     assert picker_selected_ids(picker) == []
     assert picker_confirm.is_disabled()
     assert "运行 0 个算法" in picker_confirm.inner_text()
+
+    static_toggle = picker.locator(
+        '[data-picker-category-toggle="static-grid"]'
+    )
+    static_toggle.click()
+    assert set(picker_selected_ids(picker)) == set(
+        ALGORITHM_CATEGORIES["static-grid"]
+    )
+    assert "清除此类" in static_toggle.inner_text()
+    static_toggle.click()
+    assert picker_selected_ids(picker) == []
+
+    local_toggle = picker.locator(
+        '[data-picker-category-toggle="local-trajectory"]'
+    )
+    local_toggle.click()
+    assert set(picker_selected_ids(picker)) == set(
+        ALGORITHM_CATEGORIES["local-trajectory"]
+    )
+    local_toggle.click()
+    assert picker_selected_ids(picker) == []
 
     for algorithm_id in DESKTOP_ALGORITHM_IDS:
         option = picker.locator(
@@ -330,7 +385,7 @@ with sync_playwright() as playwright:
         assert option.get_attribute("aria-pressed") == "false"
         option.click()
 
-    assert picker_selected_ids(picker) == list(DESKTOP_ALGORITHM_IDS)
+    assert set(picker_selected_ids(picker)) == set(DESKTOP_ALGORITHM_IDS)
     assert picker_confirm.is_enabled()
     assert f"运行 {selected_count} 个算法" in picker_confirm.inner_text()
     picker_confirm.click()
@@ -479,22 +534,25 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="返回编辑").click()
     page.wait_for_selector(".editor-map-frame")
     page.get_by_role("button", name="清空障碍").click()
+    page.get_by_role("button", name="障碍画笔 1").click()
     blocked_canvas = page.locator("canvas.grid-canvas")
+    blocked_canvas.scroll_into_view_if_needed()
     blocked_box = blocked_canvas.bounding_box()
     assert blocked_box is not None
     wall_start = cell_center(blocked_box, 24, 15, 6, 0)
     wall_end = cell_center(blocked_box, 24, 15, 6, 14)
     page.mouse.move(*wall_start)
     page.mouse.down()
-    page.mouse.move(*wall_end, steps=1)
+    page.mouse.move(*wall_end, steps=14)
     page.mouse.up()
-    assert page.locator(".readout").nth(2).locator("strong").inner_text() == "015"
+    blocked_count = page.locator(".readout").nth(2).locator("strong").inner_text()
+    assert blocked_count == "015", blocked_count
     page.get_by_role("button", name="选择算法并开始", exact=True).click()
     persisted_picker = page.get_by_role(
         "dialog", name="选择本轮执行算法", exact=True
     )
     persisted_picker.wait_for(state="visible")
-    assert picker_selected_ids(persisted_picker) == list(DESKTOP_ALGORITHM_IDS)
+    assert set(picker_selected_ids(persisted_picker)) == set(DESKTOP_ALGORITHM_IDS)
     persisted_confirm = persisted_picker.locator(".algorithm-picker-confirm")
     assert persisted_confirm.is_enabled()
     assert f"运行 {selected_count} 个算法" in persisted_confirm.inner_text()
@@ -556,9 +614,16 @@ with sync_playwright() as playwright:
     assert (
         mobile_picker_dimensions["scroll"] <= mobile_picker_dimensions["inner"] + 1
     ), mobile_picker_dimensions
+    mobile_last_option = mobile_picker.locator(
+        '[data-picker-algorithm-id="trajopt"]'
+    )
+    mobile_last_option.scroll_into_view_if_needed()
+    assert mobile_last_option.is_visible()
+    assert mobile_picker.locator(".algorithm-picker-footer").is_visible()
+    mobile.screenshot(path="/tmp/route-lab-picker-mobile-last-group.png")
     mobile_picker.get_by_role("button", name="仅基础", exact=True).click()
     mobile_selected_count = len(CORE_ALGORITHM_IDS)
-    assert picker_selected_ids(mobile_picker) == list(CORE_ALGORITHM_IDS)
+    assert set(picker_selected_ids(mobile_picker)) == set(CORE_ALGORITHM_IDS)
     mobile_confirm = mobile_picker.locator(".algorithm-picker-confirm")
     assert f"运行 {mobile_selected_count} 个算法" in mobile_confirm.inner_text()
     mobile_confirm.click()
