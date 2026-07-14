@@ -5,18 +5,33 @@ set -u
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_DIR="$ROOT_DIR/.service"
 VITE_BIN="$ROOT_DIR/node_modules/.bin/vite"
+DEFAULT_PORT=5173
+AUTO_PORT_SCAN_LIMIT=100
+START_LOCK_FILE="$RUNTIME_DIR/route-lab-start.lock"
+START_LOCK_METHOD=""
 
 usage() {
   echo "用法:"
-  echo "示例: $0 start 5173"
+  echo "示例: $0"
+  echo "      $0 start 5173"
+  echo "      $0 status"
   echo "      $0 status 5173"
+  echo "      $0 stop 12345"
   echo "      $0 stop"
 }
 
 validate_port() {
   local port="$1"
-  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+  if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); then
     echo "错误: 端口号必须是 1-65535 之间的整数。" >&2
+    exit 2
+  fi
+}
+
+validate_pid() {
+  local pid="$1"
+  if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]] || [[ "$pid" == "1" ]]; then
+    echo "错误: 进程号必须是大于 1 的整数。" >&2
     exit 2
   fi
 }
@@ -42,7 +57,7 @@ process_matches_service() {
   local port="$2"
   local command
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  process_matches_project "$pid" && [[ "$command" == *"--port $port"* ]]
+  process_matches_project "$pid" && [[ "$(process_port "$command")" == "$port" ]]
 }
 
 process_working_directory() {
@@ -96,12 +111,12 @@ start_service() {
     return 1
   fi
 
-  nohup "$VITE_BIN" --host 0.0.0.0 --port "$port" --strictPort >"$log_file" 2>&1 &
+  nohup "$VITE_BIN" --host 0.0.0.0 --port "$port" --strictPort >"$log_file" 2>&1 9>&- &
   pid=$!
   printf '%s\n' "$pid" >"$pid_file"
 
   for _ in {1..50}; do
-    if port_is_listening "$port"; then
+    if port_is_listening "$port" && process_is_running "$pid" && process_matches_service "$pid" "$port"; then
       echo "服务启动成功: http://127.0.0.1:$port/"
       echo "PID: $pid"
       echo "日志: $log_file"
@@ -173,6 +188,11 @@ stop_project_process() {
     return 0
   fi
   if ! process_matches_project "$pid"; then
+    if ! process_is_running "$pid"; then
+      remove_pid_files_for_pid "$pid"
+      return 0
+    fi
+    remove_pid_files_for_pid "$pid"
     echo "错误: PID $pid 不属于当前工程；未执行停止。" >&2
     return 1
   fi
@@ -188,6 +208,75 @@ stop_project_process() {
 
   kill -9 "$pid" >/dev/null 2>&1 || true
   echo "已强制停止未登记的工程服务 (PID $pid)"
+}
+
+remove_pid_files_for_pid() {
+  local pid="$1"
+  local pid_file
+  local recorded_pid
+
+  [[ -d "$RUNTIME_DIR" ]] || return 0
+  for pid_file in "$RUNTIME_DIR"/route-lab-*.pid; do
+    [[ -e "$pid_file" ]] || continue
+    recorded_pid="$(<"$pid_file")"
+    if [[ "$recorded_pid" == "$pid" ]]; then
+      rm -f "$pid_file"
+    fi
+  done
+}
+
+stop_service_by_pid() {
+  local pid="$1"
+  local pid_file
+  local recorded_pid
+  local port
+  local result
+
+  if ! process_is_running "$pid"; then
+    remove_pid_files_for_pid "$pid"
+    echo "进程 $pid 未运行，已清理可能存在的过期 PID 记录。"
+    return 0
+  fi
+
+  if ! process_matches_project "$pid"; then
+    if ! process_is_running "$pid"; then
+      remove_pid_files_for_pid "$pid"
+      echo "进程 $pid 已停止，已清理过期 PID 记录。"
+      return 0
+    fi
+    remove_pid_files_for_pid "$pid"
+    echo "错误: PID $pid 不属于当前工程；未执行停止。" >&2
+    return 1
+  fi
+
+  if [[ -d "$RUNTIME_DIR" ]]; then
+    for pid_file in "$RUNTIME_DIR"/route-lab-*.pid; do
+      [[ -e "$pid_file" ]] || continue
+      recorded_pid="$(<"$pid_file")"
+      [[ "$recorded_pid" == "$pid" ]] || continue
+      port="${pid_file##*/route-lab-}"
+      port="${port%.pid}"
+      if [[ "$port" =~ ^[0-9]+$ ]] && process_matches_service "$pid" "$port"; then
+        if stop_service "$port"; then
+          remove_pid_files_for_pid "$pid"
+          return 0
+        else
+          result=$?
+        fi
+        if ! process_is_running "$pid"; then
+          remove_pid_files_for_pid "$pid"
+        fi
+        return "$result"
+      fi
+    done
+  fi
+
+  if stop_project_process "$pid"; then
+    remove_pid_files_for_pid "$pid"
+    return 0
+  fi
+
+  return 1
 }
 
 stop_all_services() {
@@ -251,9 +340,193 @@ show_status() {
   return 1
 }
 
-if [[ $# -lt 1 ]]; then
-  usage
-  exit 2
+process_port() {
+  local command="$1"
+  local port_pattern='(^|[[:space:]])--port([=[:space:]]+)([0-9]+)($|[[:space:]])'
+
+  if [[ "$command" =~ $port_pattern ]]; then
+    printf '%s\n' "${BASH_REMATCH[3]}"
+  else
+    printf '%s\n' "-"
+  fi
+}
+
+show_all_statuses() {
+  local pid
+  local port
+  local start_time
+  local elapsed_time
+  local command
+  local access_url
+  local found=0
+
+  while read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if ! process_is_running "$pid" || ! process_matches_project "$pid"; then
+      continue
+    fi
+
+    start_time="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
+    elapsed_time="$(ps -p "$pid" -o etime= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+
+    # 进程可能在扫描和读取详情之间退出，此时不输出一条空记录。
+    [[ -n "$command" ]] || continue
+    port="$(process_port "$command")"
+    if [[ "$port" == "-" ]]; then
+      access_url="-"
+    else
+      access_url="http://127.0.0.1:$port/"
+    fi
+
+    if ((found == 0)); then
+      echo "本工程运行中的服务："
+      printf '%-8s %-7s %-24s %-12s %-30s %s\n' "PID" "端口" "启动时间" "已运行时间" "访问地址" "进程"
+    fi
+
+    [[ -n "$start_time" ]] || start_time="-"
+    [[ -n "$elapsed_time" ]] || elapsed_time="-"
+    printf '%-8s %-7s %-24s %-12s %-30s %s\n' "$pid" "$port" "$start_time" "$elapsed_time" "$access_url" "$command"
+    found=1
+  done < <(ps -axo pid=)
+
+  if ((found == 0)); then
+    echo "本工程没有运行中的服务。"
+    return 1
+  fi
+
+  return 0
+}
+
+project_service_is_running() {
+  local pid
+
+  while read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if process_is_running "$pid" && process_matches_project "$pid"; then
+      return 0
+    fi
+  done < <(ps -axo pid=)
+
+  return 1
+}
+
+find_available_port() {
+  local port="$DEFAULT_PORT"
+  local checked=0
+
+  while ((port <= 65535 && checked < AUTO_PORT_SCAN_LIMIT)); do
+    if ! port_is_listening "$port"; then
+      printf '%s\n' "$port"
+      return 0
+    fi
+    ((port += 1))
+    ((checked += 1))
+  done
+
+  return 1
+}
+
+acquire_start_lock() {
+  if ! mkdir -p "$RUNTIME_DIR"; then
+    echo "错误: 无法创建服务运行目录。" >&2
+    return 1
+  fi
+  if command -v flock >/dev/null 2>&1; then
+    if ! exec 9>"$START_LOCK_FILE"; then
+      echo "错误: 无法打开服务启动锁。" >&2
+      return 1
+    fi
+    if flock -w 30 9 >/dev/null 2>&1; then
+      START_LOCK_METHOD="fd"
+      return 0
+    fi
+    exec 9>&-
+  elif command -v lockf >/dev/null 2>&1; then
+    if ! exec 9>"$START_LOCK_FILE"; then
+      echo "错误: 无法打开服务启动锁。" >&2
+      return 1
+    fi
+    if lockf -s -t 30 9 >/dev/null 2>&1; then
+      START_LOCK_METHOD="fd"
+      return 0
+    fi
+    exec 9>&-
+  elif command -v shlock >/dev/null 2>&1; then
+    for _ in {1..300}; do
+      if shlock -p "$$" -f "$START_LOCK_FILE" >/dev/null 2>&1; then
+        START_LOCK_METHOD="shlock"
+        return 0
+      fi
+      sleep 0.1
+    done
+  else
+    echo "错误: 系统缺少 flock、lockf 或 shlock，无法安全启动服务。" >&2
+    return 1
+  fi
+
+  echo "错误: 另一个服务启动操作在 30 秒内未完成，请稍后重试。" >&2
+  return 1
+}
+
+release_start_lock() {
+  local owner=""
+
+  if [[ "$START_LOCK_METHOD" == "fd" ]]; then
+    exec 9>&-
+  elif [[ "$START_LOCK_METHOD" == "shlock" ]]; then
+    if [[ -f "$START_LOCK_FILE" ]]; then
+      owner="$(<"$START_LOCK_FILE")"
+    fi
+    if [[ "$owner" == "$$" ]]; then
+      rm -f "$START_LOCK_FILE"
+    fi
+  fi
+  START_LOCK_METHOD=""
+}
+
+run_default_mode() {
+  local port
+  local start_result=0
+  local status_result=0
+
+  if ! acquire_start_lock; then
+    return 1
+  fi
+  trap 'release_start_lock' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  if project_service_is_running; then
+    echo "检测到当前工程已有运行中的服务，未重复启动。"
+  else
+    if ! port="$(find_available_port)"; then
+      echo "错误: 从端口 $DEFAULT_PORT 开始的 $AUTO_PORT_SCAN_LIMIT 个候选端口均不可用。" >&2
+      start_result=1
+    elif ! start_service "$port"; then
+      start_result=1
+    fi
+  fi
+
+  release_start_lock
+  trap - EXIT INT TERM
+  if ((start_result != 0)); then
+    return "$start_result"
+  fi
+
+  echo
+  if ! show_all_statuses; then
+    status_result=1
+  fi
+  echo
+  echo "关闭某个服务: $0 stop <进程号>"
+  echo "关闭全部服务: $0 stop"
+  return "$status_result"
+}
+
+if [[ $# -eq 0 ]]; then
+  run_default_mode
+  exit $?
 fi
 
 action="$1"
@@ -266,14 +539,28 @@ case "$action" in
     start_service "$port"
     ;;
   stop)
-    [[ $# -eq 1 ]] || { usage; exit 2; }
-    stop_all_services
+    if [[ $# -eq 1 ]]; then
+      stop_all_services
+    elif [[ $# -eq 2 ]]; then
+      pid="$2"
+      validate_pid "$pid"
+      stop_service_by_pid "$pid"
+    else
+      usage
+      exit 2
+    fi
     ;;
   status)
-    [[ $# -eq 2 ]] || { usage; exit 2; }
-    port="$2"
-    validate_port "$port"
-    show_status "$port"
+    if [[ $# -eq 1 ]]; then
+      show_all_statuses
+    elif [[ $# -eq 2 ]]; then
+      port="$2"
+      validate_port "$port"
+      show_status "$port"
+    else
+      usage
+      exit 2
+    fi
     ;;
   *)
     usage

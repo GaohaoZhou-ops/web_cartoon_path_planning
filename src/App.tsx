@@ -35,7 +35,6 @@ import {
   createRunner,
   createSampleScenario,
   pointKey,
-  randomizeObstacles,
   samePoint,
   stepRunner,
   type AlgorithmId,
@@ -49,6 +48,12 @@ import {
   orderAlgorithmsByFinish,
   orderMetricResultsBestFirst,
 } from './ranking'
+import {
+  MAX_EDITOR_GRID_SIZE,
+  MIN_EDITOR_GRID_SIZE,
+  randomizeReachableObstacles,
+  resizeScenario,
+} from './scenario'
 
 type Phase = 'editing' | 'running' | 'paused' | 'complete'
 
@@ -66,6 +71,7 @@ const TOOL_DEFINITIONS: Array<{
 ]
 
 const SPEEDS = [0.5, 1, 2, 4, 8]
+const GRID_SIZE_AUTO_UPDATE_DELAY = 450
 const CORE_ALGORITHM_IDS: AlgorithmId[] = ['astar', 'jps', 'dijkstra', 'bfs', 'greedy']
 const NEW_ALGORITHM_IDS = new Set<AlgorithmId>([
   'bidirectional-astar',
@@ -86,6 +92,20 @@ function catalogOrder(ids: AlgorithmId[]) {
   return ALGORITHMS.filter((algorithm) => selected.has(algorithm.id)).map((algorithm) => algorithm.id)
 }
 
+function usesCompactGridOverlays(scenario: Pick<Scenario, 'cols' | 'rows'>) {
+  const aspect = scenario.cols / scenario.rows
+  return aspect <= 0.25 || aspect >= 4
+}
+
+function parseEditorGridDimension(value: string) {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) &&
+    parsed >= MIN_EDITOR_GRID_SIZE &&
+    parsed <= MAX_EDITOR_GRID_SIZE
+    ? parsed
+    : null
+}
+
 export default function App() {
   const [scenario, setScenario] = useState<Scenario>(() => createSampleScenario())
   const [snapshot, setSnapshot] = useState<Scenario | null>(null)
@@ -102,6 +122,7 @@ export default function App() {
   const runnersRef = useRef<SearchRunner[]>([])
   const finishOrderRef = useRef<AlgorithmId[]>([])
   const historyRef = useRef<Scenario[]>([])
+  const gridSizePendingRef = useRef(false)
   const schedulerRef = useRef({ lastTime: 0, accumulator: 0 })
 
   const activeScenario = snapshot ?? scenario
@@ -227,11 +248,18 @@ export default function App() {
   }
 
   const randomize = () => {
-    updateScenario((previous) => randomizeObstacles(cloneScenario(previous)))
+    const randomized = randomizeReachableObstacles(scenario)
+    updateScenario(() => randomized)
   }
 
   const setScenarioOption = (option: 'allowDiagonal' | 'preventCornerCutting', value: boolean) => {
     updateScenario((previous) => ({ ...cloneScenario(previous), [option]: value }))
+  }
+
+  const setScenarioSize = (cols: number, rows: number) => {
+    if (cols === scenario.cols && rows === scenario.rows) return
+    const resized = resizeScenario(scenario, { cols, rows })
+    updateScenario(() => resized)
   }
 
   const removeWaypoint = (index: number) => {
@@ -341,6 +369,10 @@ export default function App() {
             onRemoveWaypoint={removeWaypoint}
             onMoveWaypoint={moveWaypoint}
             onSetOption={setScenarioOption}
+            onSetSize={setScenarioSize}
+            onSizePendingChange={(pending) => {
+              gridSizePendingRef.current = pending
+            }}
           />
         ) : (
           <BenchmarkSidebar
@@ -358,6 +390,7 @@ export default function App() {
               scenario={scenario}
               tool={tool}
               onCellAction={handleCellAction}
+              isGridSizePending={() => gridSizePendingRef.current}
             />
           ) : (
             <ComparisonStage
@@ -664,6 +697,8 @@ interface EditorSidebarProps {
   onRemoveWaypoint: (index: number) => void
   onMoveWaypoint: (index: number, direction: -1 | 1) => void
   onSetOption: (option: 'allowDiagonal' | 'preventCornerCutting', value: boolean) => void
+  onSetSize: (cols: number, rows: number) => void
+  onSizePendingChange: (pending: boolean) => void
 }
 
 function EditorSidebar({
@@ -680,11 +715,19 @@ function EditorSidebar({
   onRemoveWaypoint,
   onMoveWaypoint,
   onSetOption,
+  onSetSize,
+  onSizePendingChange,
 }: EditorSidebarProps) {
   return (
     <aside className="side-panel editor-panel">
       <section className="panel-section">
-        <SectionTitle index="01" title="绘制场景" />
+        <SectionTitle index="01" title="绘制场景" accessory={`${scenario.cols}×${scenario.rows}`} />
+        <GridSizeControl
+          cols={scenario.cols}
+          rows={scenario.rows}
+          onCommit={onSetSize}
+          onPendingChange={onSizePendingChange}
+        />
         <div className="tool-grid">
           {TOOL_DEFINITIONS.map((definition) => {
             const Icon = definition.icon
@@ -786,16 +829,190 @@ function EditorSidebar({
   )
 }
 
+function GridSizeControl({
+  cols,
+  rows,
+  onCommit,
+  onPendingChange,
+}: {
+  cols: number
+  rows: number
+  onCommit: (cols: number, rows: number) => void
+  onPendingChange: (pending: boolean) => void
+}) {
+  const currentDraft = () => ({ cols: String(cols), rows: String(rows) })
+  const [draft, setDraft] = useState(currentDraft)
+  const timerRef = useRef<number | null>(null)
+  const onCommitRef = useRef(onCommit)
+  const onPendingChangeRef = useRef(onPendingChange)
+  onCommitRef.current = onCommit
+  onPendingChangeRef.current = onPendingChange
+
+  useEffect(() => {
+    onPendingChangeRef.current(false)
+    setDraft(currentDraft())
+  }, [cols, rows])
+
+  const nextCols = parseEditorGridDimension(draft.cols)
+  const nextRows = parseEditorGridDimension(draft.rows)
+  const valid = nextCols !== null && nextRows !== null
+  const changed = valid && (nextCols !== cols || nextRows !== rows)
+
+  const cancelPendingCommit = () => {
+    if (timerRef.current === null) return
+    window.clearTimeout(timerRef.current)
+    timerRef.current = null
+  }
+  const resetDraft = () => {
+    cancelPendingCommit()
+    onPendingChangeRef.current(false)
+    setDraft(currentDraft())
+  }
+  const commitDraft = () => {
+    cancelPendingCommit()
+    if (nextCols === null || nextRows === null || !changed) return false
+    onPendingChangeRef.current(false)
+    onCommitRef.current(nextCols, nextRows)
+    return true
+  }
+
+  useEffect(() => {
+    cancelPendingCommit()
+    if (nextCols === null || nextRows === null || !changed) return
+    const timer = window.setTimeout(() => {
+      if (timerRef.current === timer) timerRef.current = null
+      onPendingChangeRef.current(false)
+      onCommitRef.current(nextCols, nextRows)
+    }, GRID_SIZE_AUTO_UPDATE_DELAY)
+    timerRef.current = timer
+    return () => {
+      window.clearTimeout(timer)
+      if (timerRef.current === timer) timerRef.current = null
+    }
+  }, [changed, nextCols, nextRows, cols, rows])
+
+  useEffect(
+    () => () => {
+      cancelPendingCommit()
+      onPendingChangeRef.current(false)
+    },
+    [],
+  )
+
+  const updateDraft = (field: 'cols' | 'rows', value: string) => {
+    const nextDraft = { ...draft, [field]: value }
+    const parsedCols = parseEditorGridDimension(nextDraft.cols)
+    const parsedRows = parseEditorGridDimension(nextDraft.rows)
+    const pending =
+      parsedCols !== null &&
+      parsedRows !== null &&
+      (parsedCols !== cols || parsedRows !== rows)
+    onPendingChangeRef.current(pending)
+    setDraft(nextDraft)
+  }
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      resetDraft()
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      commitDraft()
+    }
+  }
+
+  return (
+    <form
+      className={`grid-size-control ${valid ? '' : 'is-invalid'} ${changed ? 'is-pending' : ''}`}
+      aria-label="地图尺寸设置"
+      aria-busy={changed}
+      onSubmit={(event) => {
+        event.preventDefault()
+        commitDraft()
+      }}
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget
+        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
+        if (valid) commitDraft()
+        else resetDraft()
+      }}
+    >
+      <div className="grid-size-fields">
+        <label className="grid-size-field" htmlFor="grid-cols">
+          <span>
+            列数 <small>COLS</small>
+          </span>
+          <input
+            id="grid-cols"
+            name="grid-cols"
+            type="number"
+            min={MIN_EDITOR_GRID_SIZE}
+            max={MAX_EDITOR_GRID_SIZE}
+            step="1"
+            inputMode="numeric"
+            enterKeyHint="done"
+            value={draft.cols}
+            aria-label="地图列数"
+            aria-describedby="grid-size-help"
+            aria-invalid={nextCols === null}
+            onChange={(event) => updateDraft('cols', event.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        </label>
+        <span className="grid-size-times" aria-hidden="true">×</span>
+        <label className="grid-size-field" htmlFor="grid-rows">
+          <span>
+            行数 <small>ROWS</small>
+          </span>
+          <input
+            id="grid-rows"
+            name="grid-rows"
+            type="number"
+            min={MIN_EDITOR_GRID_SIZE}
+            max={MAX_EDITOR_GRID_SIZE}
+            step="1"
+            inputMode="numeric"
+            enterKeyHint="done"
+            value={draft.rows}
+            aria-label="地图行数"
+            aria-describedby="grid-size-help"
+            aria-invalid={nextRows === null}
+            onChange={(event) => updateDraft('rows', event.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        </label>
+      </div>
+      <div className="grid-size-footer">
+        <p id="grid-size-help">
+          {!valid
+            ? `请输入 ${MIN_EDITOR_GRID_SIZE}–${MAX_EDITOR_GRID_SIZE} 的整数 · 地图未更新`
+            : changed
+              ? `即将更新为 ${nextCols}×${nextRows} · 自动重置随机障碍`
+              : '输入后自动更新 · 保留路线节点并保证可达'}
+        </p>
+        <span className="grid-size-auto" aria-hidden="true"><i />{valid ? (changed ? 'SYNC' : 'AUTO') : 'ERROR'}</span>
+      </div>
+      <span className="sr-only" aria-live="polite">
+        当前地图尺寸为 {cols} 列、{rows} 行；随机障碍已更新，完整路线保持可达
+      </span>
+    </form>
+  )
+}
+
 function EditorStage({
   scenario,
   tool,
   onCellAction,
+  isGridSizePending,
 }: {
   scenario: Scenario
   tool: EditTool
   onCellAction: (point: Point, tool: EditTool) => void
+  isGridSizePending: () => boolean
 }) {
   const activeTool = TOOL_DEFINITIONS.find((definition) => definition.id === tool)
+  const gridAspect = scenario.cols / scenario.rows
+  const compactGridOverlays = usesCompactGridOverlays(scenario)
   return (
     <div className="editor-stage">
       <div className="stage-heading">
@@ -810,29 +1027,42 @@ function EditorStage({
       </div>
 
       <div className="editor-map-frame">
-        <div className="map-coordinates map-coordinates--top">
-          {Array.from({ length: scenario.cols }, (_, index) => (
-            <span key={index}>{index % 3 === 0 ? String(index).padStart(2, '0') : '·'}</span>
-          ))}
-        </div>
-        <div className="map-coordinates map-coordinates--left">
-          {Array.from({ length: scenario.rows }, (_, index) => (
-            <span key={index}>{index % 2 === 0 ? String(index).padStart(2, '0') : '·'}</span>
-          ))}
-        </div>
-        <GridCanvas
-          scenario={scenario}
-          editing
-          tool={tool}
-          onCellAction={onCellAction}
-          className="editor-canvas"
-        />
-        <div className="map-overlay map-overlay--top">
-          <span>LIVE EDIT</span>
-          <strong>{scenario.obstacles.size} BLOCKS</strong>
-        </div>
-        <div className="map-overlay map-overlay--bottom">
-          按住拖动连续绘制 · 右键临时擦除
+        <div
+          className="editor-grid-viewport"
+          data-compact-overlays={compactGridOverlays ? 'true' : undefined}
+          style={{ '--grid-aspect': gridAspect } as React.CSSProperties}
+        >
+          <div
+            className="map-coordinates map-coordinates--top"
+            style={{ gridTemplateColumns: `repeat(${scenario.cols}, minmax(0, 1fr))` }}
+          >
+            {Array.from({ length: scenario.cols }, (_, index) => (
+              <span key={index}>{index % 3 === 0 ? String(index).padStart(2, '0') : '·'}</span>
+            ))}
+          </div>
+          <div
+            className="map-coordinates map-coordinates--left"
+            style={{ gridTemplateRows: `repeat(${scenario.rows}, minmax(0, 1fr))` }}
+          >
+            {Array.from({ length: scenario.rows }, (_, index) => (
+              <span key={index}>{index % 2 === 0 ? String(index).padStart(2, '0') : '·'}</span>
+            ))}
+          </div>
+          <GridCanvas
+            scenario={scenario}
+            editing
+            tool={tool}
+            onCellAction={onCellAction}
+            isInteractionLocked={isGridSizePending}
+            className="editor-canvas"
+          />
+          <div className="map-overlay map-overlay--top">
+            <span>LIVE EDIT</span>
+            <strong>{scenario.obstacles.size} BLOCKS</strong>
+          </div>
+          <div className="map-overlay map-overlay--bottom">
+            按住拖动连续绘制 · 右键临时擦除
+          </div>
         </div>
       </div>
 
@@ -1103,7 +1333,10 @@ function AlgorithmCard({
         </div>
       </header>
 
-      <div className="algorithm-canvas-wrap">
+      <div
+        className="algorithm-canvas-wrap"
+        data-compact-overlays={usesCompactGridOverlays(scenario) ? 'true' : undefined}
+      >
         <GridCanvas
           scenario={scenario}
           runner={runner}

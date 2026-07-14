@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import type { AlgorithmMeta, Point, Scenario, SearchRunner } from './pathfinding'
 import { pointKey, samePoint } from './pathfinding'
 
@@ -12,6 +18,7 @@ interface GridCanvasProps {
   tool?: EditTool
   visualTick?: number
   onCellAction?: (point: Point, tool: EditTool) => void
+  isInteractionLocked?: () => boolean
   className?: string
 }
 
@@ -23,6 +30,7 @@ export default function GridCanvas({
   tool = 'obstacle',
   visualTick = 0,
   onCellAction,
+  isInteractionLocked,
   className = '',
 }: GridCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -87,7 +95,7 @@ export default function GridCanvas({
   }
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!editing) return
+    if (!editing || isInteractionLocked?.()) return
     paintToolRef.current = event.button === 2 ? 'erase' : tool
     lastCellRef.current = ''
     lastPointRef.current = null
@@ -151,7 +159,12 @@ export default function GridCanvas({
     <canvas
       ref={canvasRef}
       className={`grid-canvas ${className}`}
-      style={{ aspectRatio: `${scenario.cols} / ${scenario.rows}` }}
+      style={
+        {
+          '--grid-aspect': scenario.cols / scenario.rows,
+          aspectRatio: `${scenario.cols} / ${scenario.rows}`,
+        } as CSSProperties
+      }
       data-tool={editing ? tool : undefined}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}

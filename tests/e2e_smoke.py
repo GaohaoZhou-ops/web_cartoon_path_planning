@@ -121,6 +121,177 @@ with sync_playwright() as playwright:
         "button", name="选择算法并开始", exact=True
     ).is_enabled()
 
+    # Resize automatically, reject invalid drafts, preserve route nodes, and undo atomically.
+    grid_cols = page.get_by_label("地图列数", exact=True)
+    grid_rows = page.get_by_label("地图行数", exact=True)
+    assert grid_cols.input_value() == "24"
+    assert grid_rows.input_value() == "15"
+    assert grid_cols.get_attribute("min") == "5"
+    assert grid_rows.get_attribute("min") == "5"
+    assert grid_cols.get_attribute("max") == "100"
+    assert grid_rows.get_attribute("max") == "100"
+    assert page.get_by_role("button", name="应用尺寸", exact=True).count() == 0
+
+    grid_cols.fill("101")
+    assert grid_cols.get_attribute("aria-invalid") == "true"
+    page.wait_for_timeout(550)
+    assert page.locator(".readout").first.locator("strong").inner_text() == "24×15"
+    grid_cols.press("Escape")
+    assert grid_cols.input_value() == "24"
+
+    grid_cols.fill("4")
+    assert grid_cols.get_attribute("aria-invalid") == "true"
+    page.locator(".stage-heading").click()
+    assert grid_cols.input_value() == "24"
+    assert page.locator(".readout").first.locator("strong").inner_text() == "24×15"
+
+    grid_cols.fill("30")
+    assert page.locator(".grid-size-control").get_attribute("aria-busy") == "true"
+    grid_cols.press("Escape")
+    page.wait_for_timeout(550)
+    assert grid_cols.input_value() == "24"
+    assert page.locator(".readout").first.locator("strong").inner_text() == "24×15"
+
+    grid_cols.fill("5")
+    grid_rows.fill("5")
+    page.wait_for_function(
+        "document.querySelector('.readout strong')?.textContent?.trim() === '5×5'"
+    )
+    assert page.locator(".readout").first.locator("strong").inner_text() == "5×5"
+    assert page.locator(".map-coordinates--top > span").count() == 5
+    assert page.locator(".map-coordinates--left > span").count() == 5
+    assert page.get_by_role(
+        "button", name="选择算法并开始", exact=True
+    ).is_enabled()
+    assert not page.locator(".route-node--start").get_attribute("class").endswith("is-missing")
+    assert not page.locator(".route-node--end").get_attribute("class").endswith("is-missing")
+    assert "X 02 · Y 04" in page.locator(".route-node--start small").inner_text()
+    assert "X 04 · Y 03" in page.locator(".route-node--end small").inner_text()
+    resized_block_count = int(
+        page.locator(".readout").nth(2).locator("strong").inner_text()
+    )
+    assert 0 <= resized_block_count < 25
+    page.screenshot(path="/tmp/route-lab-grid-size.png", full_page=True)
+
+    page.get_by_role("button", name="撤销", exact=True).click()
+    page.wait_for_function(
+        "document.querySelector('.readout strong')?.textContent?.trim() === '24×15'"
+    )
+    page.wait_for_timeout(550)
+    assert grid_cols.input_value() == "24"
+    assert grid_rows.input_value() == "15"
+    assert page.locator(".readout").first.locator("strong").inner_text() == "24×15"
+    assert page.locator(".readout").nth(2).locator("strong").inner_text() == "048"
+    assert page.locator(".map-coordinates--top > span").count() == 24
+    assert page.locator(".map-coordinates--left > span").count() == 15
+    assert page.get_by_role(
+        "button", name="选择算法并开始", exact=True
+    ).is_enabled()
+
+    # An immediate canvas click flushes the pending size first and must not edit the old grid.
+    race_canvas_box = page.locator("canvas.grid-canvas").bounding_box()
+    assert race_canvas_box is not None
+    grid_cols.fill("6")
+    grid_rows.fill("5")
+    race_x, race_y = cell_center(race_canvas_box, 24, 15, 0, 0)
+    page.mouse.click(race_x, race_y)
+    page.wait_for_function(
+        "document.querySelector('.readout strong')?.textContent?.trim() === '6×5'"
+    )
+    page.get_by_role("button", name="撤销", exact=True).click()
+    page.wait_for_function(
+        """document.querySelector('.readout strong')?.textContent?.trim() === '24×15'
+            && document.querySelector('#grid-cols')?.value === '24'
+            && document.querySelector('#grid-rows')?.value === '15'"""
+    )
+    assert page.locator(".readout").nth(2).locator("strong").inner_text() == "048"
+
+    extreme_grid_boxes = {}
+    for cols, rows in ((5, 100), (100, 5)):
+        grid_cols.fill(str(cols))
+        grid_rows.fill(str(rows))
+        grid_rows.press("Enter")
+        page.wait_for_function(
+            f"document.querySelector('.readout strong')?.textContent?.trim() === '{cols}×{rows}'"
+        )
+        grid_box = page.locator("canvas.grid-canvas").bounding_box()
+        assert grid_box is not None
+        assert grid_box["height"] <= min(1000 * 0.72, 900) + 1, grid_box
+        assert abs(grid_box["width"] / grid_box["height"] - cols / rows) < 0.01, grid_box
+        assert page.locator(".editor-grid-viewport").get_attribute(
+            "data-compact-overlays"
+        ) == "true"
+        assert page.locator(".map-overlay:visible").count() == 0
+        extreme_grid_boxes[f"{cols}x{rows}"] = grid_box
+        page.get_by_role("button", name="撤销", exact=True).click()
+        page.wait_for_function(
+            """document.querySelector('.readout strong')?.textContent?.trim() === '24×15'
+                && document.querySelector('#grid-cols')?.value === '24'
+                && document.querySelector('#grid-rows')?.value === '15'"""
+        )
+        assert grid_cols.input_value() == "24"
+        assert grid_rows.input_value() == "15"
+    assert page.locator(".map-overlay:visible").count() == 2
+
+    # Runtime cards use the same compact-overlay rule on an extreme aspect ratio.
+    grid_cols.fill("100")
+    grid_rows.fill("5")
+    grid_rows.press("Enter")
+    page.wait_for_function(
+        "document.querySelector('.readout strong')?.textContent?.trim() === '100×5'"
+    )
+    extreme_canvas = page.locator("canvas.grid-canvas")
+    extreme_canvas_box = extreme_canvas.bounding_box()
+    assert extreme_canvas_box is not None
+    assert page.get_by_role(
+        "button", name="选择算法并开始", exact=True
+    ).is_enabled()
+    page.get_by_role("button", name="选择算法并开始", exact=True).click()
+    compact_picker = page.get_by_role("dialog", name="选择本轮执行算法", exact=True)
+    compact_picker.get_by_role("button", name="清空", exact=True).click()
+    compact_picker.locator('[data-picker-algorithm-id="astar"]').click()
+    compact_picker.locator(".algorithm-picker-confirm").click()
+    page.wait_for_selector(".algorithm-card")
+    assert page.locator(
+        '.algorithm-canvas-wrap[data-compact-overlays="true"]'
+    ).count() == 1
+    assert page.locator(".segment-badge:visible").count() == 0
+    assert page.locator(".canvas-legend:visible").count() == 0
+    page.get_by_role("button", name="8×", exact=True).click()
+    page.wait_for_selector(".phase-indicator--complete", timeout=10_000)
+    assert page.locator(
+        '.algorithm-card[data-algorithm-id="astar"].algorithm-card--complete'
+    ).count() == 1
+    page.get_by_role("button", name="2×", exact=True).click()
+    page.get_by_role("button", name="返回编辑", exact=True).click()
+    page.get_by_role("button", name="撤销", exact=True).click()
+    page.wait_for_function(
+        """document.querySelector('.readout strong')?.textContent?.trim() === '24×15'
+            && document.querySelector('#grid-cols')?.value === '24'
+            && document.querySelector('#grid-rows')?.value === '15'"""
+    )
+    assert grid_cols.input_value() == "24"
+    assert grid_rows.input_value() == "15"
+
+    # The explicit random-obstacle action also preserves a complete route.
+    page.get_by_role("button", name="随机障碍", exact=True).click()
+    page.get_by_role("button", name="选择算法并开始", exact=True).click()
+    reachable_picker = page.get_by_role("dialog", name="选择本轮执行算法", exact=True)
+    assert picker_selected_ids(reachable_picker) == ["astar"]
+    reachable_picker.locator(".algorithm-picker-confirm").click()
+    page.get_by_role("button", name="8×", exact=True).click()
+    page.wait_for_selector(".phase-indicator--complete", timeout=10_000)
+    assert page.locator(
+        '.algorithm-card[data-algorithm-id="astar"].algorithm-card--complete'
+    ).count() == 1
+    page.get_by_role("button", name="2×", exact=True).click()
+    page.get_by_role("button", name="返回编辑", exact=True).click()
+    page.get_by_role("button", name="撤销", exact=True).click()
+    page.wait_for_function(
+        "document.querySelector('.readout strong')?.textContent?.trim() === '24×15'"
+    )
+    assert page.locator(".readout").nth(2).locator("strong").inner_text() == "048"
+
     # Edit the actual canvas: add one waypoint and verify fast drag interpolation.
     canvas = page.locator("canvas.grid-canvas")
     box = canvas.bounding_box()
@@ -361,6 +532,10 @@ with sync_playwright() as playwright:
     assert mobile.get_by_role(
         "button", name="选择算法并开始", exact=True
     ).is_visible()
+    assert mobile.get_by_label("地图列数", exact=True).is_visible()
+    assert mobile.get_by_label("地图行数", exact=True).is_visible()
+    assert mobile.get_by_label("地图列数", exact=True).get_attribute("min") == "5"
+    assert mobile.get_by_label("地图列数", exact=True).get_attribute("max") == "100"
     assert mobile.locator(".route-section").is_visible()
     assert mobile.locator(".movement-section").is_visible()
     touch_action = mobile.locator("canvas.grid-canvas").evaluate(
@@ -423,6 +598,8 @@ with sync_playwright() as playwright:
             "final_scroll": final_scroll_state,
             "flip_animations": flip_animation_count,
             "final_charts": 4,
+            "grid_resize": "passed",
+            "extreme_grid_boxes": extreme_grid_boxes,
             "mobile_width": dimensions,
             "mobile_picker_width": mobile_picker_dimensions,
             "mobile_algorithms": mobile_selected_count,
